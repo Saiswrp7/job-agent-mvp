@@ -1,0 +1,23 @@
+[
+  {"company": "Paytm",      "source": "lever",      "slug": "paytm",      "type": "b2c", "stage": "public", "industry": "fintech",           "size": "5000+"},
+  {"company": "Meesho",     "source": "lever",      "slug": "meesho",     "type": "b2c", "stage": "late",   "industry": "ecommerce",         "size": "1000-5000"},
+  {"company": "CRED",       "source": "lever",      "slug": "cred",       "type": "b2c", "stage": "late",   "industry": "fintech",           "size": "500-1000"},
+  {"company": "Fi Money",   "source": "lever",      "slug": "fi",         "type": "b2c", "stage": "growth", "industry": "fintech",           "size": "200-500"},
+  {"company": "Porter",     "source": "lever",      "slug": "porter",     "type": "b2c", "stage": "late",   "industry": "logistics",         "size": "1000-5000"},
+  {"company": "Pocket FM",  "source": "lever",      "slug": "pocketfm",   "type": "b2c", "stage": "growth", "industry": "audio entertainment","size": "500-1000"},
+  {"company": "Mindtickle", "source": "lever",      "slug": "mindtickle", "type": "b2b", "stage": "late",   "industry": "saas",              "size": "500-1000"},
+
+  {"company": "Krafton",    "source": "greenhouse", "slug": "krafton",    "type": "b2c", "stage": "public", "industry": "gaming",            "size": "5000+"},
+  {"company": "Glance",     "source": "greenhouse", "slug": "glance",     "type": "b2c", "stage": "late",   "industry": "consumer tech",     "size": "500-1000"},
+  {"company": "Slice",      "source": "greenhouse", "slug": "slice",      "type": "b2c", "stage": "late",   "industry": "fintech",           "size": "500-1000"},
+  {"company": "Groww",      "source": "greenhouse", "slug": "groww",      "type": "b2c", "stage": "late",   "industry": "fintech",           "size": "1000-5000"},
+  {"company": "BlueStone",  "source": "greenhouse", "slug": "bluestone",  "type": "b2c", "stage": "late",   "industry": "jewellery retail",  "size": "1000-5000"},
+  {"company": "Truecaller", "source": "greenhouse", "slug": "truecaller", "type": "b2c", "stage": "public", "industry": "consumer tech",     "size": "200-500"},
+  {"company": "Nothing",    "source": "greenhouse", "slug": "nothing",    "type": "b2c", "stage": "growth", "industry": "consumer hardware", "size": "200-500"},
+  {"company": "Verse Innovation", "source": "greenhouse", "slug": "verse", "type": "b2c", "stage": "late",  "industry": "consumer tech",     "size": "1000-5000"},
+  {"company": "InMobi",     "source": "greenhouse", "slug": "inmobi",     "type": "b2b", "stage": "late",   "industry": "adtech",            "size": "1000-5000"},
+  {"company": "Druva",      "source": "greenhouse", "slug": "druva",      "type": "b2b", "stage": "late",   "industry": "saas",              "size": "1000-5000"},
+  {"company": "Observe.AI", "source": "greenhouse", "slug": "observeai",  "type": "b2b", "stage": "growth", "industry": "saas",              "size": "200-500"},
+
+  {"company": "Navi",       "source": "ashby",      "slug": "navi",       "type": "b2c", "stage": "late",   "industry": "fintech",           "size": "1000-5000"}
+]

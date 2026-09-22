@@ -1,0 +1,17 @@
+{"id": "city-plain", "say": "growth roles in Bangalore", "expect": {"city": "Bangalore"}}
+{"id": "city-spelling", "say": "any growth jobs in Bengaluru", "expect": {"city": "Bangalore"}, "means": "Bengaluru and Bangalore are the same place. If only one works, half your searches come back empty for no reason."}
+{"id": "count-three", "say": "find me 3 growth roles", "expect": {"count": 3}}
+{"id": "count-ten", "say": "show me 10 product jobs", "expect": {"count": 10}}
+{"id": "count-default", "say": "growth jobs please", "expect": {"count": 5}}
+{"id": "recency-week", "say": "growth roles posted in the last 7 days", "expect": {"posted_within_days": 7}}
+{"id": "recency-month", "say": "anything from the last month", "expect": {"posted_within_days": 30}}
+{"id": "title-growth", "say": "growth manager roles", "expect_contains": {"title_keywords": "growth"}}
+{"id": "title-product", "say": "product manager jobs", "expect_contains": {"title_keywords": "product"}}
+{"id": "remote", "say": "remote only please", "expect": {"remote": true}}
+{"id": "company-named", "say": "anything open at Meesho", "expect_contains": {"companies": "Meesho"}}
+{"id": "b2c", "say": "growth roles at B2C companies", "expect": {"company_type": "b2c"}}
+{"id": "no-city-invented", "say": "growth roles anywhere", "expect": {"city": null}, "means": "It would quietly limit you to one city you never named, hiding jobs you would have wanted."}
+{"id": "no-date-invented", "say": "growth manager jobs", "expect": {"posted_within_days": null}, "means": "It would quietly ignore older postings you never asked it to skip."}
+{"id": "soft-kept", "say": "growth roles, nothing CRM-heavy", "expect_nonempty": ["soft_criteria"], "means": "The part of your sentence that is a preference rather than a filter gets lost, so 'nothing CRM-heavy' stops being taken into account."}
+{"id": "country-india", "say": "growth roles anywhere in India", "expect_country": "India", "means": "Jobs in London and San Mateo get shortlisted. The AI reads all of them and throws them out afterwards, so you pay for descriptions that were never eligible."}
+{"id": "count-and-country", "say": "find me 3 growth roles anywhere in India", "expect": {"count": 3}, "expect_country": "India", "means": "You asked for a number and a place. If either is dropped you get a different list than the one you asked for, and nothing says so."}

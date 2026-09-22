@@ -1,0 +1,3 @@
+{"id": "india-not-us", "say": "growth roles anywhere in India", "must_not_pick": {"city_outside": ["India"]}, "means": "You get shown a job you cannot take, in a country you did not ask about."}
+{"id": "bangalore-only", "say": "growth roles in Bangalore only", "must_not_pick": {"city_not": ["Bangalore", "Remote"]}, "means": "You named one city and got a job somewhere else, which wastes the slot a real match could have used."}
+{"id": "junior-not-senior", "say": "growth roles for someone with 4 years experience", "must_not_pick": {"years_min_above": 8}, "means": "You get shown roles that will reject you on experience, which is the most demoralising kind of false hope."}

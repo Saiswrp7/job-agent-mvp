@@ -1,0 +1,9 @@
+.env
+jobs.db
+artifacts/
+__pycache__/
+*.pyc
+master.json
+backup-before-reset-225524/
+.pytest_cache/
+.DS_Store
