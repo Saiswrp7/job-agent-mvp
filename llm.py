@@ -49,11 +49,13 @@ _load_env()
 #: provider -> (env var, base_url or None, default model, cheap model)
 PROVIDERS = {
     "anthropic": ("ANTHROPIC_API_KEY", None, "claude-opus-5", "claude-haiku-4-5"),
-    # glm-4-flash is retired (400 code 1211). The cheap slot is what `probe`
-    # calls, so it also wants a model with no thinking block to spend its
-    # budget on: glm-4.5-air returns plain text, glm-4.5-flash does not.
+    # One generation for everything, so a change in behaviour is the code and
+    # never a model swap: glm-5.3 for chat, ranking and apply; glm-5.3-flash
+    # for the cheap slot (labels, probe). Both *always* think — disabling it
+    # is a 400 (code 1210) — but `output_config.effort = "low"` skips the
+    # thinking block entirely: 16 output tokens instead of ~200 on a label.
     "glm": ("GLM_API_KEY", "https://open.bigmodel.cn/api/anthropic",
-            "glm-5", "glm-4.5-air"),
+            "glm-5.3", "glm-5.3-flash"),
     # The cheap slot is what `probe` calls, so it must be a model that answers
     # in a handful of tokens. A reasoning model cannot: it spends the whole
     # budget thinking and returns content: null, which reads as a dead key.
@@ -61,8 +63,9 @@ PROVIDERS = {
                    "anthropic/claude-sonnet-5", "google/gemini-2.5-flash-lite"),
 }
 
-_client = None
-_provider: str | None = None
+#: One client per provider. Keyed, not a single slot, because labelling runs on
+#: a cheap provider while chat stays on the one with tool calling.
+_clients: dict[str, object] = {}
 
 
 def configured() -> list[str]:
@@ -103,20 +106,18 @@ def RANK_MODEL() -> str:
     return os.environ.get("RANK_MODEL", models()[0])
 
 
-def client():
-    global _client, _provider
-    p = provider()
-    if _client is None or _provider != p:
+def client(name: str | None = None):
+    p = name or provider()
+    if p not in _clients:
         env, base_url, *_ = PROVIDERS[p]
         key = os.environ[env]
         if p == "openrouter":
-            _client = _OpenAIish(key, base_url)
+            _clients[p] = _OpenAIish(key, base_url)
         else:
             import anthropic
-            _client = (anthropic.Anthropic(api_key=key, base_url=base_url)
-                       if base_url else anthropic.Anthropic(api_key=key))
-        _provider = p
-    return _client
+            _clients[p] = (anthropic.Anthropic(api_key=key, base_url=base_url)
+                           if base_url else anthropic.Anthropic(api_key=key))
+    return _clients[p]
 
 
 class _OpenAIish:
@@ -135,13 +136,17 @@ class _OpenAIish:
                      "content-type": "application/json"},
         )
 
-    def text(self, *, model: str, system: str, user: str, max_tokens: int) -> str:
-        r = self._http.post("/chat/completions", json={
-            "model": model, "max_tokens": max_tokens,
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}],
-        })
+    def text(self, *, model: str, system: str, user: str, max_tokens: int,
+             temperature: float | None = None) -> str:
+        body = {"model": model, "max_tokens": max_tokens,
+                "messages": [{"role": "system", "content": system},
+                             {"role": "user", "content": user}]}
+        if temperature is not None:
+            body["temperature"] = temperature
+        r = self._http.post("/chat/completions", json=body)
         r.raise_for_status()
+        import usage
+        usage.record(r.json(), model=model)
         choice = r.json()["choices"][0]
         content = choice["message"].get("content")
         if not content:
@@ -178,6 +183,15 @@ def prompt(name: str) -> str:
     return (PROMPTS / f"{name}.md").read_text()
 
 
+def effort_level(level: str, via: str | None = None) -> str:
+    """The effort level this provider accepts. GLM 5.3 takes low, high or max
+    and rejects medium with a 400 (code 1210), which broke every chat turn the
+    day the model was switched. Medium rounds up: the chat is the product."""
+    if (via or provider()) == "glm" and level == "medium":
+        return "high"
+    return level
+
+
 def supports_tools() -> bool:
     """The apply agent needs real tool use, which the OpenAI shim does not do."""
     return provider() in ("anthropic", "glm")
@@ -185,16 +199,28 @@ def supports_tools() -> bool:
 
 def complete(system: str, user: str, *, model: str | None = None,
              max_tokens: int = 4096, effort: str = "high",
-             cache: bool = True, ttl: str = "1h") -> str:
+             cache: bool = True, ttl: str = "1h",
+             via: str | None = None,
+             temperature: float | None = None,
+             timeout: float | None = None) -> str:
+    """`via` names a provider for this one call, leaving `LLM_PROVIDER` alone.
+    Labelling uses it: a cheap classifier should not need the provider that
+    the agents need for tool calling.
+
+    `temperature` reaches OpenRouter and GLM. On Anthropic it is ignored:
+    adaptive thinking there fixes it, and sending one is an error.
+    """
+    p = via or provider()
     model = model or MODEL()
-    c = client()
+    c = client(p)
 
     if isinstance(c, _OpenAIish):
+        counted()
         return c.text(model=model, system=system, user=user,
-                      max_tokens=max_tokens).strip()
+                      max_tokens=max_tokens, temperature=temperature).strip()
 
     system_blocks = [{"type": "text", "text": system}]
-    if cache and provider() == "anthropic":
+    if cache and p == "anthropic":
         system_blocks[0]["cache_control"] = {"type": "ephemeral", "ttl": ttl}
 
     kwargs: dict = {
@@ -203,13 +229,25 @@ def complete(system: str, user: str, *, model: str | None = None,
         "system": system_blocks,
         "messages": [{"role": "user", "content": user}],
     }
-    if provider() == "anthropic":
+    if p == "anthropic":
         # Adaptive thinking; budget_tokens is a 400 on Opus 5.
         kwargs["thinking"] = {"type": "adaptive"}
         kwargs["output_config"] = {"effort": effort}
+    elif p == "glm":
+        # GLM 5.3 reads the same field. "low" answers with no thinking block,
+        # which is what a form-fill or a label wants; "high" thinks first.
+        kwargs["output_config"] = {"effort": effort_level(effort, p)}
+        if temperature is not None:
+            kwargs["temperature"] = temperature
 
+    if timeout is not None:
+        # Per request. The client's own limit is 180 s with two retries, so
+        # one stuck reply could hold a resume upload for 7 minutes (414 s seen).
+        kwargs["timeout"] = timeout
     counted()
     resp = c.messages.create(**kwargs)
+    import usage
+    usage.record(resp, model=model)
     if getattr(resp, "stop_reason", None) == "refusal":
         raise RuntimeError(f"refused: {getattr(resp, 'stop_details', None)}")
     return "".join(b.text for b in resp.content if b.type == "text").strip()
@@ -266,21 +304,19 @@ def probe(name: str) -> tuple[bool, str]:
     env, base_url, main, cheap = PROVIDERS[name]
     if not os.environ.get(env):
         return False, f"{env} not set"
-    prev = os.environ.get("LLM_PROVIDER")
-    global _client, _provider
-    os.environ["LLM_PROVIDER"] = name
-    _client, _provider = None, None
     try:
-        out = complete("Reply with exactly: ok", "ping",
-                       model=cheap, max_tokens=64, cache=False)
+        # effort="low": a thinking model spends a small budget thinking and
+        # returns empty text, which reads as a live key that says nothing.
+        out = complete("Reply with exactly: ok", "ping", model=cheap,
+                       max_tokens=256, cache=False, via=name, effort="low")
+        if not out:
+            return True, f"{cheap} answered, but with empty text"
         return True, f"{cheap} -> {out[:40]!r}"
     except Exception as exc:                          # noqa: BLE001
         detail = str(exc)
         m = re.search(r"\b(401|403|404|429|5\d\d)\b", detail)
         return False, f"{type(exc).__name__}" + (f" {m.group(1)}" if m else "")
     finally:
-        if prev is None:
-            os.environ.pop("LLM_PROVIDER", None)
-        else:
-            os.environ["LLM_PROVIDER"] = prev
-        _client, _provider = None, None
+        # A probe that built a client for a dead key should not leave it
+        # cached for the real calls that follow.
+        _clients.pop(name, None)

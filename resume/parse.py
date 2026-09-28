@@ -14,32 +14,48 @@ from pathlib import Path
 
 import llm
 
+import paths
+
 HERE = Path(__file__).resolve().parent
-MASTER = HERE / "master.json"
+#: Per-profile: the parsed resume is the user's, not the code's.
+MASTER = paths.MASTER
 
 SYSTEM = """Extract this resume into JSON. Return ONLY JSON, this shape:
 
 {
   "name": "...",
-  "contact": {"email": "...", "phone": "...", "location": "...", "linkedin": "..."},
+  "contact": {"email": "...", "phone": "...", "location": "...", "linkedin": "...",
+              "github": "...", "x": "...", "website": "..."},
   "summary": "...",
   "experience": [
     {"company": "...", "title": "...", "dates": "Jan 2023 - Present",
      "bullets": ["...", "..."]}
   ],
-  "education": [{"school": "...", "degree": "...", "dates": "..."}],
-  "skills": {"Category": ["skill", "skill"]}
+  "education": [{"school": "...", "degree": "...", "dates": "...", "score": "..."}],
+  "skills": {"Category": ["skill", "skill"]},
+  "projects": [{"name": "...", "text": "...", "dates": "..."}],
+  "positions": [{"name": "...", "text": "...", "dates": "..."}],
+  "achievements": [{"name": "...", "text": "...", "dates": "..."}],
+  "certifications": [{"name": "...", "text": "...", "dates": "..."}]
 }
 
 Rules:
 - Copy text exactly. Do not improve, shorten, or rewrite anything.
+- Every section in the resume goes somewhere. Nothing is dropped.
+- `experience` is paid work and internships only. A campus or volunteer role
+  (placement coordinator, club lead, class representative, NSS/NCC) goes in
+  `positions`.
+- Awards, ranks, scholarships and competition wins go in `achievements`.
+- Languages spoken go in `skills` under the category "Languages".
+- A section the resume does not have is an empty list.
 - Experience in reverse chronological order, most recent first.
 - Keep every bullet. Selection happens later, per job.
 - One consistent date format throughout.
 - If a field is genuinely absent, use null. Never invent one.
-- `linkedin` must be a full https:// URL. A resume usually shows the word
-  "LinkedIn" as a hyperlink, so the visible text is not the address — take the
-  address from the LINKS list below the resume text."""
+- `linkedin`, `github`, `x` (Twitter/X) and `website` (portfolio or personal
+  site) must each be a full https:// URL, or null. A resume usually shows the
+  word "LinkedIn" as a hyperlink, so the visible text is not the address — take
+  the address from the LINKS list below the resume text."""
 
 #: Anchor text is not an address. A resume that renders its LinkedIn as the
 #: word "LinkedIn" leaves nothing useful in the extracted text, and whatever
@@ -74,35 +90,75 @@ def pdf_text(path: Path) -> str:
     return out.stdout
 
 
+#: A profile, not a page on the site: github.com/name but not github.com/name/repo.
+#: A repo link is a project, and the repo may not even be theirs.
+_PROFILES = {
+    "linkedin": re.compile(r"linkedin\.com/in/[\w%-]+", re.I),
+    "github": re.compile(r"//(?:www\.)?github\.com/[\w-]+/?(?:[?#]|$)", re.I),
+    "x": re.compile(r"//(?:www\.)?(?:x|twitter)\.com/\w+/?(?:[?#]|$)", re.I),
+}
+#: The same profiles written out as plain text, which is how a resume that
+#: already shows its URLs carries them. No scheme needed in the text.
+_IN_TEXT = re.compile(
+    r"(?<![\w.-])(?:https?://)?(?:www\.)?(?:linkedin\.com/in/[\w%-]+|github\.com/[\w-]+"
+    r"|(?:x|twitter)\.com/\w+)(?![\w/.-]*\w)", re.I)
+_OWNED = re.compile(r"linkedin\.com|github\.com|(?:^|[/.])(?:x|twitter)\.com", re.I)
+
+
+def text_links(text: str) -> list[str]:
+    """Profile URLs typed out in the resume's text, as full https:// addresses."""
+    seen: dict[str, None] = {}
+    for m in _IN_TEXT.finditer(text or ""):
+        url = re.sub(r"^(?:https?://)?(?:www\.)?", "https://", m.group(0))
+        seen.setdefault(url.rstrip("/"), None)
+    return list(seen)
+
+
 def _fix_links(master: dict, links: list[str]) -> dict:
-    """Overwrite `contact.linkedin` with a real LinkedIn URL when one exists.
+    """Overwrite each profile link with the real URL when the file has one.
 
     Deterministic, and it runs after the model: the address is a fact sitting
     in the file, so it should not depend on the model having copied it right.
     """
     contact = master.setdefault("contact", {}) or {}
     master["contact"] = contact
-    real = next((u for u in links if "linkedin.com/in/" in u.lower()), None)
-    if real:
-        contact["linkedin"] = real
-    elif not str(contact.get("linkedin") or "").startswith("http"):
-        # Anchor text like "Portfolio | LinkedIn" is worse than nothing: it
-        # would be typed into a URL field verbatim.
-        contact["linkedin"] = None
-    other = next((u for u in links
-                  if "linkedin.com" not in u.lower()), None)
-    if other and not contact.get("website"):
+    # Older spellings the model sometimes uses; one key per link from here on.
+    for old, new in (("twitter", "x"), ("portfolio", "website")):
+        if contact.get(old) and not contact.get(new):
+            contact[new] = contact[old]
+        contact.pop(old, None)
+    for key, pattern in _PROFILES.items():
+        real = next((u for u in links if pattern.search(u)), None)
+        if real:
+            contact[key] = real
+        elif not str(contact.get(key) or "").startswith("http"):
+            # Anchor text like "Portfolio | LinkedIn" is worse than nothing: it
+            # would be typed into a URL field verbatim.
+            contact[key] = None
+    # The portfolio is whatever link is left over — anything not a profile on
+    # one of the sites above, and not a mail link.
+    other = next((u for u in links if u.lower().startswith("http")
+                  and not _OWNED.search(u)), None)
+    if other and not str(contact.get("website") or "").startswith("http"):
         contact["website"] = other
+    elif not str(contact.get("website") or "").startswith("http"):
+        contact["website"] = None
     return master
 
 
 def parse(pdf: Path, out: Path = MASTER) -> dict:
-    links = pdf_links(pdf)
     text = pdf_text(pdf)
+    # Hyperlinks first, then addresses typed out as text: a resume that
+    # already prints "github.com/name" may have no link annotation at all.
+    links = list(dict.fromkeys(pdf_links(pdf) + text_links(text)))
     if links:
         text += "\n\nLINKS (real addresses behind this resume's hyperlinks):\n"
         text += "\n".join(links)
-    master = llm.complete_json(SYSTEM, text, max_tokens=8192)
+    # 60 s a try: a normal read is 6-18 s, so a reply slower than that is
+    # stuck, and the client's retry gets a fresh one sooner.
+    import usage
+    with usage.purpose("read_resume"):
+        master = llm.complete_json(SYSTEM, text, max_tokens=8192, timeout=60)
     master = _fix_links(master, links)
     out.write_text(json.dumps(master, indent=2, ensure_ascii=False))
     return master
@@ -124,6 +180,9 @@ def vault_rows(master: dict) -> dict:
                      if str(c.get("linkedin") or "").startswith("http") else None),
         "website": (c.get("website")
                     if str(c.get("website") or "").startswith("http") else None),
+        "github": (c.get("github")
+                   if str(c.get("github") or "").startswith("http") else None),
+        "x": (c.get("x") if str(c.get("x") or "").startswith("http") else None),
     }
     if jobs:
         rows["current_company"] = jobs[0].get("company")

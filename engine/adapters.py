@@ -7,6 +7,7 @@ Greenhouse you would need one request per job.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import html
 import re
@@ -25,6 +26,8 @@ CITY_ALIASES = {
     "kolkata": "Kolkata", "ahmedabad": "Ahmedabad", "jaipur": "Jaipur",
 }
 
+COUNTRY_ONLY = {"india", "in", "bharat"}
+
 REMOTE_RE = re.compile(r"\bremote\b|\bwork from home\b|\banywhere\b", re.I)
 SENIORITY_RE = [
     (re.compile(r"\b(vp|vice president|head of|director)\b", re.I), "head"),
@@ -36,6 +39,28 @@ YEARS_RE = re.compile(
     r"(\d{1,2})\s*(?:\+|-|–|to)?\s*(\d{1,2})?\s*(?:\+)?\s*years?", re.I
 )
 TAG_RE = re.compile(r"<[^>]+>")
+
+
+#: The most one request may take, start to finish. httpx's timeout is per
+#: step, so a stalled connection once sat for 15 minutes under a 20 s setting.
+REQUEST_LIMIT = 30.0
+
+
+async def get_once_more(client: httpx.AsyncClient, url: str, **kw) -> httpx.Response:
+    """GET, and on a dropped connection try exactly once more.
+
+    A dropped connection is not the site saying "slow down" — that answer comes
+    as a status code (429, 999), and the callers still stop on it at once. On
+    2026-09-25, 3 of 15 LinkedIn fetches from this Mac died with ReadError and
+    all 3 worked on an immediate retry; before this, each one ended the whole
+    run (LinkedIn added 0 jobs twice, Adzuna stopped after 6-7 calls twice).
+    A second drop in a row still stops the run.
+    """
+    try:
+        return await asyncio.wait_for(client.get(url, **kw), REQUEST_LIMIT)
+    except (httpx.TransportError, asyncio.TimeoutError):
+        await asyncio.sleep(2)
+        return await asyncio.wait_for(client.get(url, **kw), REQUEST_LIMIT)
 
 
 def strip_html(raw: str | None) -> str:
@@ -58,6 +83,10 @@ def norm_city(location: str | None) -> tuple[str | None, int]:
         if re.search(rf"\b{re.escape(alias)}\b", low):
             return canonical, remote
     head = re.split(r"[,/|]", location)[0].strip()
+    # "India" alone says where the country is, not the city. Stored as a city
+    # it matched no search and was offered as "another city" to try.
+    if head.lower() in COUNTRY_ONLY:
+        return None, remote
     return (head or None), remote
 
 
@@ -198,4 +227,109 @@ async def ashby(client: httpx.AsyncClient, slug: str, company: str,
     return out
 
 
-ADAPTERS = {"greenhouse": greenhouse, "lever": lever, "ashby": ashby}
+def _place(city: str | None, region: str | None, country: str | None,
+           remote: bool) -> str | None:
+    """One location string from the parts a board gives separately, so
+    `norm_city` and the country rules read it like any other board's."""
+    parts = [p for p in (city, region, country) if p]
+    if remote:
+        parts.append("Remote")
+    return ", ".join(dict.fromkeys(parts)) or None
+
+
+async def workable(client: httpx.AsyncClient, slug: str, company: str,
+                   meta: dict) -> list[dict]:
+    """Workable's public widget feed: the endpoint their own embeddable
+    careers widget reads, documented in their help centre as needing no
+    key. `details=true` puts every description in the one response."""
+    url = f"https://apply.workable.com/api/v1/widget/accounts/{slug}?details=true"
+    r = await client.get(url)
+    r.raise_for_status()
+    out = []
+    for j in r.json().get("jobs", []):
+        remote = str(j.get("telecommuting")).lower() == "true"
+        out.append(_row(
+            source="workable", source_id=j["shortcode"], company=company,
+            title=j.get("title", ""),
+            location=_place(j.get("city"), j.get("state"), j.get("country"), remote),
+            description=strip_html(j.get("description")),
+            url=j.get("url") or j.get("shortlink"),
+            apply_url=j.get("application_url"),
+            posted_at=j.get("published_on") or j.get("created_at"),
+            updated_at=j.get("published_on") or j.get("created_at"),
+            department=j.get("department") or None,
+            employment_type=j.get("employment_type") or None, meta=meta,
+        ))
+    return out
+
+
+SR_API = "https://api.smartrecruiters.com/v1/companies/{slug}/postings"
+#: Between detail requests. SmartRecruiters' list gives no description, so a
+#: board costs one request per new posting, and they all hit one host.
+SR_PAUSE = 0.3
+
+
+async def smartrecruiters(client: httpx.AsyncClient, slug: str, company: str,
+                          meta: dict) -> list[dict]:
+    """SmartRecruiters' public Posting API (no key for public postings).
+
+    The list is filtered to one country (`country` in boards.json, India by
+    default): a global employer like Bosch has thousands of postings and
+    these users can take only the Indian ones.
+
+    The list has no description, so each posting needs its own request. A
+    posting already stored with the same release date comes back marked
+    `unchanged` instead: sync keeps it open without rewriting it, and the
+    hourly run only pays for what is new.
+    """
+    country = (meta.get("country") or "in").lower()
+    known = meta.get("known") or {}
+    listed, offset = [], 0
+    while True:
+        r = await client.get(SR_API.format(slug=slug),
+                             params={"limit": 100, "offset": offset,
+                                     "country": country})
+        r.raise_for_status()
+        page = r.json()
+        listed += page.get("content") or []
+        offset += 100
+        if offset >= int(page.get("totalFound") or 0) or not page.get("content"):
+            break
+
+    out = []
+    for p in listed:
+        pid, released = str(p["id"]), p.get("releasedDate")
+        if known.get(pid) and known[pid] == released:
+            out.append({"source": "smartrecruiters", "source_id": pid,
+                        "unchanged": True})
+            continue
+        await asyncio.sleep(SR_PAUSE)
+        d = await client.get(f"{SR_API.format(slug=slug)}/{pid}")
+        d.raise_for_status()
+        out.append(sr_row(d.json(), company, meta))
+    return out
+
+
+def sr_row(d: dict, company: str, meta: dict) -> dict:
+    loc = d.get("location") or {}
+    sections = (d.get("jobAd") or {}).get("sections") or {}
+    body = "\n\n".join(
+        f"{s.get('title') or ''}\n{strip_html(s.get('text'))}".strip()
+        for key in ("jobDescription", "qualifications", "additionalInformation")
+        if (s := sections.get(key)) and s.get("text"))
+    return _row(
+        source="smartrecruiters", source_id=d["id"], company=company,
+        title=(d.get("name") or "").strip(),
+        location=_place(loc.get("city"), loc.get("region"),
+                        "India" if loc.get("country") == "in" else loc.get("country"),
+                        bool(loc.get("remote"))),
+        description=body, url=d.get("postingUrl"), apply_url=d.get("applyUrl"),
+        posted_at=d.get("releasedDate"), updated_at=d.get("releasedDate"),
+        department=(d.get("department") or {}).get("label")
+        or (d.get("function") or {}).get("label"),
+        employment_type=(d.get("typeOfEmployment") or {}).get("label"), meta=meta,
+    )
+
+
+ADAPTERS = {"greenhouse": greenhouse, "lever": lever, "ashby": ashby,
+            "workable": workable, "smartrecruiters": smartrecruiters}

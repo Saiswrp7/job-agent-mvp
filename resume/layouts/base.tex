@@ -1,0 +1,64 @@
+% The one template every layout renders through. A layout is only the values
+% filled in below (resume/layouts/__init__.py), never a separate .tex file:
+% seven hand-written templates drift apart, and one render path means the one
+% ATS gate in render.py covers all of them (the RenderCV design, Research B §4).
+%
+% Single column always. A two-column header or body is the most common reason
+% an ATS interleaves a resume: the parser reads across the page and mixes the
+% columns. render.py asserts the extracted order, so a regression fails the
+% build instead of shipping a scrambled parse.
+%
+% The class option only picks the size family; the body size is set exactly by
+% redefining \normalsize, because the class accepts only 10, 11 or 12pt. The
+% old template asked for 10.5pt, which article silently ignored, so every
+% resume until Phase 7 was set at 10pt.
+\documentclass[((CLASS_SIZE)),((PAPER))]{article}
+
+\usepackage[margin=((MARGIN))]{geometry}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xcolor}
+\usepackage{needspace}
+\definecolor{accent}{HTML}{((ACCENT))}
+
+% fontspec, never a Type 1 font package: only fontspec can switch ligatures
+% off. A merged "fl" extracts as U+FB02, so "AppsFlyer" became "Appsﬂyer" and
+% a recruiter's search never found the resume. NoCommon turns off fi/fl/ffi;
+% the TeX ligatures (-- and ---) stay on, since the dashes in dates need them.
+\usepackage{fontspec}
+\setmainfont{((FONT))}[((FONT_OPTS)), Ligatures=NoCommon]
+((RUPEE))
+
+\renewcommand{\normalsize}{\fontsize{((SIZE))}{((LEAD))}\selectfont}
+
+((HEADING))
+
+% No hyphenation, ragged right. A hyphen splits a keyword in the extracted
+% text ("A/B Test-" / "ing"), and a recruiter searching "Testing" misses it;
+% without hyphens, justified lines would gap, so the right edge goes ragged.
+\hyphenpenalty=10000
+\exhyphenpenalty=10000
+\raggedright
+
+\pagestyle{empty}
+\setlength{\parskip}{0pt}
+\setlength{\parindent}{0pt}
+\setlist[itemize]{itemsep=((ITEMSEP)), parsep=0pt, topsep=2pt, leftmargin=12pt}
+
+% Company and dates on one line, title under it: the same order for every
+% role, because parsers segment jobs by that repeated pattern.
+\newcommand{\datestyle}[1]{((ROLE_DATES)){#1}}
+\newcommand{\role}[3]{%
+  ((ROLE_COMPANY)){#1} \hfill \datestyle{#2}\\[1pt]%
+  \textit{#3}\vspace{3pt}%
+}
+
+\begin{document}
+\normalsize
+
+((NAME_BLOCK))
+
+((BODY))
+
+\end{document}

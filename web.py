@@ -19,6 +19,7 @@ from pathlib import Path
 
 import chat
 import llm
+import paths
 from engine import db
 
 HERE = Path(__file__).resolve().parent
@@ -422,6 +423,50 @@ f.addEventListener('submit',async e=>{
 """
 
 
+def take_resume(name: str, data: bytes, conn) -> dict:
+    """Take a resume PDF and make it the master. {"reply": ...} or {"error": ...}.
+
+    Shared by the web page and the Telegram bot. Parsing it here rather than
+    through a tool is deliberate: the file arrives as bytes, not as something
+    the model chose, so there is nothing for it to get wrong. It only sees the
+    result.
+    """
+    from resume import parse as parse_mod
+    import vault as v
+
+    name = Path(name).name
+    if not name.lower().endswith(".pdf"):
+        return {"error": f"{name} is not a PDF. Resumes are parsed from PDF "
+                         f"so the text extracts the way an ATS reads it."}
+
+    dest = paths.UPLOADS / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+
+    try:
+        master = parse_mod.parse(dest)
+        rows = parse_mod.vault_rows(master)
+        for k, val in rows.items():
+            v.put(k, val, source="resume", conn=conn)
+        # Where the file actually is. Both `apply` paths read this key and
+        # nothing used to write it, so every application started with no
+        # resume attached and the agent reported it could not find one.
+        v.put("master_resume_path", str(dest), source="resume", conn=conn)
+        rows["master_resume_path"] = str(dest)
+    except Exception as exc:                            # noqa: BLE001
+        traceback.print_exc()
+        return {"error": f"Could not read {name}: {type(exc).__name__}: {exc}"}
+
+    jobs = ", ".join(e.get("company", "?") for e in master.get("experience", []))
+    return {"reply": (
+        f"Read **{name}**.\n\n"
+        f"I have you as **{master.get('name')}** — "
+        f"{len(master.get('experience', []))} roles ({jobs}), "
+        f"{len(rows)} details saved: {', '.join(rows)}.\n\n"
+        f"Everything I put in a form comes from this, so tell me if any of "
+        f"it is wrong. What kind of work are you looking for?")}
+
+
 class Handler(BaseHTTPRequestHandler):
     # One conversation, one process. Set in main().
     session: dict = {}
@@ -445,53 +490,10 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, page.encode(), "text/html; charset=utf-8")
 
     def _upload(self, payload: dict) -> None:
-        """Take a resume PDF from the browser and make it the master.
-
-        Parsing it here rather than through a tool is deliberate: the file
-        arrives as bytes, not as something the model chose, so there is nothing
-        for it to get wrong. It only sees the result.
-        """
         import base64
 
-        from resume import parse as parse_mod
-        import vault as v
-
-        name = Path(payload.get("name") or "resume.pdf").name
-        if not name.lower().endswith(".pdf"):
-            return self._send(200, json.dumps(
-                {"error": f"{name} is not a PDF. Resumes are parsed from PDF "
-                          f"so the text extracts the way an ATS reads it."}
-            ).encode(), "application/json")
-
-        dest = HERE / "artifacts" / "uploads" / name
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(base64.b64decode(payload["data"]))
-
-        try:
-            master = parse_mod.parse(dest)
-            rows = parse_mod.vault_rows(master)
-            conn = self.session["conn"]
-            for k, val in rows.items():
-                v.put(k, val, source="resume", conn=conn)
-            # Where the file actually is. Both `apply` paths read this key and
-            # nothing used to write it, so every application started with no
-            # resume attached and the agent reported it could not find one.
-            v.put("master_resume_path", str(dest), source="resume", conn=conn)
-            rows["master_resume_path"] = str(dest)
-        except Exception as exc:                            # noqa: BLE001
-            traceback.print_exc()
-            return self._send(200, json.dumps(
-                {"error": f"Could not read {name}: {type(exc).__name__}: {exc}"}
-            ).encode(), "application/json")
-
-        jobs = ", ".join(e.get("company", "?") for e in master.get("experience", []))
-        out = {"reply": (
-            f"Read **{name}**.\n\n"
-            f"I have you as **{master.get('name')}** — "
-            f"{len(master.get('experience', []))} roles ({jobs}), "
-            f"{len(rows)} details saved: {', '.join(rows)}.\n\n"
-            f"Everything I put in a form comes from this, so tell me if any of "
-            f"it is wrong. What kind of work are you looking for?")}
+        out = take_resume(payload.get("name") or "resume.pdf",
+                          base64.b64decode(payload["data"]), self.session["conn"])
         self._send(200, json.dumps(out).encode(), "application/json")
 
     def do_POST(self) -> None:
@@ -548,6 +550,10 @@ def main(fixture: str | None = None, port: int = PORT, open_browser: bool = True
     import chatlog
 
     conn = db.connect()
+    # Background applications live in this process; any a previous run left
+    # "running" were cut off by the restart, and must say so.
+    from apply import worker
+    worker.recover(conn)
     # History still dies with the process — but the transcript no longer does.
     session = chatlog.new_session()
     Handler.session = {
@@ -559,6 +565,7 @@ def main(fixture: str | None = None, port: int = PORT, open_browser: bool = True
     server = HTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}"
     print(f"job agent · {llm.provider()}/{llm.MODEL()} · {url}")
+    print(f"profile: {paths.label()}")
     print(f"logging to session {session} · `python cli.py log` to read it back")
     print("ctrl-c to stop")
     if open_browser:

@@ -1,0 +1,20 @@
+{
+  "country": "in",
+  "max_days_old": 30,
+  "results_per_page": 50,
+  "pages_per_run": 250,
+  "every_hours": 20,
+  "queries": [
+    {"category": "it-jobs",                       "label": "IT Jobs"},
+    {"category": "accounting-finance-jobs",       "label": "Accounting & Finance Jobs"},
+    {"category": "sales-jobs",                    "label": "Sales Jobs"},
+    {"category": "engineering-jobs",              "label": "Engineering Jobs"},
+    {"category": "pr-advertising-marketing-jobs", "label": "PR, Advertising & Marketing Jobs"},
+    {"category": "hr-jobs",                       "label": "HR & Recruitment Jobs"},
+    {"category": "admin-jobs",                    "label": "Admin Jobs"},
+    {"category": "creative-design-jobs",          "label": "Creative & Design Jobs"},
+    {"category": "customer-services-jobs",        "label": "Customer Services Jobs"},
+    {"category": "consultancy-jobs",              "label": "Consultancy Jobs"},
+    {"category": "graduate-jobs",                 "label": "Graduate Jobs"}
+  ]
+}

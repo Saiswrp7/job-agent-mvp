@@ -163,3 +163,44 @@ Workday, Darwinbox, Keka or their own careers page. Fix by extending the company
 list and adapter count, not by changing the design above. An agent that reads a
 careers page belongs in the cron, where nobody is waiting, never in the query
 path.
+
+---
+
+## Adzuna enrichment: designed, not built (2026-09-28)
+
+The ask: for a search's ~20 Adzuna candidates, fetch the full description and
+the employer's own apply link, outside the user's wait.
+
+What the links actually do, checked on three live rows:
+
+- `redirect_url` is an adzuna.in `/details/<id>` or `/land/ad/<id>` page.
+- `/details/<id>` returns the full job text (or 404 once expired). The text is
+  there, but it is Adzuna's page, not an API.
+- "Apply for this job" on that page is `/land/ad/<id>?aztt=...`, which
+  answered **403 Access Denied** to a scripted request. Getting past it would
+  mean getting past a bot wall on purpose.
+- Their API terms: a breach is "any usage that appears to be an attempt to
+  extract Confidential Information for commercial reuse". Their API returns a
+  snippet on purpose ("we currently only provide a snippet").
+
+So the half that matters (the real apply link) is behind a wall, and the other
+half is lifting their page text into our product. Not built.
+
+What gets the same result without either:
+
+1. **Supersede, don't enrich.** Most Adzuna rows from real employers also sit
+   on that employer's own board. `python cli.py discover` finds those boards
+   from the company names Adzuna gives us; once a board is in `boards.json`,
+   the next sync fetches the full job and `close_superseded` closes the
+   Adzuna copy (same company, same title). This already runs every sync.
+2. **Company-name lookup at ingest.** Next step: when an Adzuna row's company
+   has a board in `boards.json` but no exact title match (titles differ in
+   punctuation), match on normalised title and keep a pointer instead of
+   closing, so search can show the board copy.
+3. **Careers-page reader, in the cron.** For employers on Workday, Darwinbox or
+   their own site (most of India), an agent that reads a careers page belongs
+   in the hourly cron, over companies named by `saved_searches`, never in the
+   query path. Same rule as above.
+
+A job that stays Adzuna-only keeps its snippet and "Jobs by Adzuna" credit;
+it can be found and ranked, not tailored for or applied to by the agent.

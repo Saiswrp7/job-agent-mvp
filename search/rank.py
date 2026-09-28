@@ -14,6 +14,7 @@ truncation cuts.
 from __future__ import annotations
 
 import json
+import re
 
 import llm
 
@@ -104,15 +105,47 @@ def pick(rows: list[dict], filters: dict, message: str,
     return chosen, cut
 
 
-def format_results(picks: list[dict], notes: list[str] | None = None) -> str:
+def ref(job: dict) -> str:
+    """A short name for one job, used everywhere a job is addressed.
+
+    **Why a name and not a position.** Tools used to take `n`, and every n from
+    1 to 5 resolves to something — so a wrong one is not an error, it is a
+    different job, applied to silently. The agent renumbers the list when it
+    writes the reply, so the n the person typed and the n the tool used had
+    already drifted apart in half the conversations we recorded.
+
+    A name can be wrong, and a wrong name raises. That is the entire point.
+    Derived from company and title, so it is also readable in a log.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-",
+                  f"{job.get('company','')} {job.get('title','')}".lower())
+    return slug.strip("-")[:48] or str(job.get("source_id", "job"))
+
+
+def format_results(picks: list[dict], notes: list[str] | None = None,
+                   numbered: bool = True) -> str:
+    """`numbered=False` is what the chat agent gets.
+
+    A numbered tool result is a second numbered list in the context, in search
+    order, competing with the one the agent writes to the person in its own
+    order. Asked to "tailor my resume for 1", the model took 1 from this list
+    rather than from its own reply and tailored for a different job. Only the
+    reply the person actually reads should carry numbers.
+    """
     if not picks:
+        # The notes are the useful part of an empty result — what was tried,
+        # what was kept, what exists nearby. Dropping them left the agent with
+        # nothing to offer but "try widening".
+        if notes:
+            return "Nothing matched. (" + "; ".join(notes) + ")"
         return "Nothing matched. Try widening the city or the date range."
     lines = []
     for i, r in enumerate(picks, 1):
         posted = (r.get("posted_at") or "")[:10]
         where = r.get("city") or r.get("location") or ""
+        head = f"{i}. " if numbered else ""
         lines.append(
-            f"{i}. {r['title']} — {r['company']}, {where} · {posted}\n"
+            f"{head}[{ref(r)}] {r['title']} — {r['company']}, {where} · {posted}\n"
             f"   {r['reason']}\n"
             f"   {r.get('apply_url') or r.get('url')}"
         )
@@ -129,7 +162,7 @@ def to_reference_table(picks: list[dict]) -> str:
     point of keeping it separate from the search result.
     """
     return json.dumps(
-        [{"n": i, "source": r["source"], "source_id": r["source_id"],
+        [{"ref": ref(r), "source": r["source"], "source_id": r["source_id"],
           "title": r["title"], "company": r["company"]}
-         for i, r in enumerate(picks, 1)]
+         for r in picks]
     )

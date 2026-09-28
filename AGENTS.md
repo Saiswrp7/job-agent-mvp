@@ -30,14 +30,59 @@ Holds four things:
 ### Tools
 
 ```
-search_jobs(query_text)        → 5 jobs with reasons
-get_job(job_id)                → full detail for one
-tailor_resume(job_id)          → bullets as text, for approval
-start_application(job_id)      → hands off, returns immediately
-application_status(app_id)     → where it got to
+search_jobs(query_text)             → 5 jobs with reasons
+get_job(ref)                        → full detail for one
+tailor_resume(ref, instruction?, layout?) → tailored bullets + PDF, for approval
+build_resume(instruction?, layout?) → their updated resume, no job attached
+resume_layouts(preview?)            → the layouts, two suggested, PNG previews
+send_resume(which)                  → their upload or the newest built PDF, as a file
+remember_experience(kind, text)     → puts a fact they stated on the record
+set_resume_preference(choice)       → saves the default for the resume question
+start_application(ref, resume?)     → hands off, returns immediately
+answer_application(app_id, answer)  → resumes a parked run
+application_status(app_id)          → where it got to
 ```
 
 Each wraps a plain function. The agent never sees SQL, adapters, or Jev.
+
+### Which resume goes out (2026-09-24)
+
+Three resumes, and the person picks one **on every apply**:
+
+| Choice (they see) | What goes out | Vault value |
+|---|---|---|
+| your file | the one they uploaded, byte for byte | `existing` |
+| updated | their file + facts told in chat since, fitted to the page limit (`generate.build`; weakest lines cut, oldest role first, cuts reported) | `updated` (old `master` reads as this) |
+| tailored | rebuilt for this job (`tailor.build`) | `tailored` |
+
+- The record (career store) holds every verified fact. **It is never sent
+  whole**: nobody applies with everything they have done.
+- The agent asks: *"Which resume for this one: your file, updated or
+  tailored? (Last time: tailored.)"* When nothing has been told since the
+  upload (`generate.additions() == 0`), "updated" would be their file again, so
+  the question is only **your file or tailored**, and a request for "updated"
+  sends their file. The vault's `resume_mode` is only the **default**.
+- **The gate is code, not prompt.** `start_application` sends only a mode that
+  `said_resume()` finds in the person's own message this turn: a named mode,
+  "same"/"as before" when a default exists, or a bare "yes" right after a reply
+  that asked. Anything else returns an ERROR carrying the question. That is
+  why "just apply to everything, don't ask me" still gets asked.
+- **A batch is one question.** "Apply to all five" asks once. Then:
+  **your file or updated** means the same PDF for all five; **tailored** builds
+  one resume per job inside `start_application`, not shown first.
+- A tailored resume they saw and approved on an earlier turn goes out as they
+  saw it. No resume on file means no question.
+- Generated resumes reach the apply agent as `render.upload_path(pdf)`, a
+  copy named `Firstname_Lastname_Resume.pdf`. Their own file goes out
+  untouched.
+
+**Layouts:** `resume_layouts` lists the 7, suggests two and previews page 1 of
+their own resume as PNG; `layout` on build_resume/tailor_resume picks one by
+name or description, saves it as `resume_layout`, and "apply" builds in it.
+A layout that hurts them (a two-pager at 3 years) is built anyway, with one
+warning.
+
+Plan and research: `RESUME_PLAN.md`, `research/resume/`.
 
 ### Context
 
@@ -186,7 +231,8 @@ Three consequences worth stating:
   └─ reply: bullets as text, for approval
 
 "looks good, apply"
-  ├─ render.py           → PDF, pdftotext gate
+  ├─ said_resume()       → they approved the tailored one, so no question
+  ├─ render.py           → PDF, ATS gate, upload copy Firstname_Lastname_Resume.pdf
   ├─ start_application() × 2
   └─ two apply agents loop independently, park independently
 ```

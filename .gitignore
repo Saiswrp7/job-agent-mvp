@@ -7,3 +7,10 @@ master.json
 backup-before-reset-225524/
 .pytest_cache/
 .DS_Store
+jobs.backup-*.db
+profiles/
+backups/
+evals/out/
+scenario-runs/runs/
+scenario-runs/*.log
+scenario-runs/transcript-*.md

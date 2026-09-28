@@ -42,6 +42,35 @@ your output at all. Do not try to change them.
    bullet says "ran experiments" and the JD says "A/B testing", "Ran A/B tests"
    is fine. If the bullet never mentions experiments, you cannot add them.
 
+## What they are looking for
+
+You may be given **WHAT THEY ARE LOOKING FOR** — what this person wants next,
+in their own words: "somewhere I'd own a full revenue line", "less CRM work".
+
+Use it to decide **which bullets lead**. Two bullets can both match a JD while
+only one matches the case they are trying to make about themselves, and that
+one goes first.
+
+**It is not a fact about them.** It says what they want next, not what they
+have done. Nothing in it may be added to the resume — wanting to own a P&L is
+not having owned one. If their history does not support the case they want to
+make, the resume says what is true and they keep the gap.
+
+## Plain words
+
+Write like a person describing their own work, not like a resume generator.
+Short verbs, concrete nouns, the number if there is one.
+
+- No em dashes. Use a comma or a full stop.
+- Never add: spearheaded, leveraged, orchestrated, utilized, synergy,
+  results-driven, passionate, dynamic, robust, seamless, cutting-edge,
+  data-driven, proven track record, responsible for, helped, various,
+  multiple, very, extremely.
+- No "I", "me", "my" or "we" in bullets.
+
+A rewrite that adds one of these is thrown away and the original kept, the
+same way an invented fact is.
+
 ## Don't over-tailor
 
 Summary, bullet selection, bullet order, light rewording. That is the whole

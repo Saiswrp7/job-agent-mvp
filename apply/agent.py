@@ -9,12 +9,18 @@ and one they abandon.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 
 import llm
 import vault
 from apply import harness
-from apply.browser import BaseBrowser, ManualBrowser, PlaywrightBrowser
+from apply.browser import BaseBrowser, ManualBrowser
+from apply.jev import JevBrowser
+
+#: Which real browser applies: "jev" (the person's own Chrome, this Mac) or
+#: "cloud" (a Browserbase Chrome per run — for people who are not at this Mac).
+BROWSER_ENV = "JOB_AGENT_BROWSER"
 from engine import db
 
 
@@ -26,9 +32,11 @@ def create(job: dict, resume_path: str | None = None,
         # Asking twice must not start twice. Without this a second "apply to 3"
         # opens a parallel row, and once ALLOW_SUBMIT is on that is two real
         # applications to the same company.
+        # `submitted` is excluded too: that one is finished, and a second row
+        # for it would be a duplicate application rather than a retry.
         existing = conn.execute(
             "SELECT id FROM applications WHERE source=? AND source_id=? "
-            "AND status != 'done' ORDER BY id LIMIT 1",
+            "AND status NOT IN ('submitted', 'failed') ORDER BY id LIMIT 1",
             (job.get("source"), str(job.get("source_id")))).fetchone()
         if existing is not None:
             return existing[0]
@@ -88,6 +96,7 @@ def start(app_id: int, job: dict, browser: BaseBrowser,
     close_after = conn is None
     conn = conn or db.connect()
     try:
+        _note_replay(conn, app_id, browser)
         pre = preflight(browser, conn)
         system = system_prompt(job, pre["known"], resume_path)
 
@@ -99,6 +108,7 @@ def start(app_id: int, job: dict, browser: BaseBrowser,
         )
         return harness.run(app_id, browser, system, first_message=first, conn=conn)
     finally:
+        _close(browser)
         if close_after:
             conn.close()
 
@@ -114,12 +124,35 @@ def resume_run(app_id: int, answer: str, browser: BaseBrowser,
             raise ValueError(f"no application {app_id}")
         job = {"title": row["title"], "company": row["company"],
                "apply_url": row["apply_url"]}
+        _note_replay(conn, app_id, browser)
         pre = preflight(browser, conn)
         system = system_prompt(job, pre["known"], row["resume_path"])
+        # Every resume opens the form afresh, so what was typed before the
+        # question is gone. Said here, or the agent believes its history and
+        # meets it at the submit guard as "required fields still empty".
+        answer = (f"{answer}\n\n(The form was opened again to carry on, so it "
+                  f"is empty now: read_form and fill it again.)")
         return harness.run(app_id, browser, system, answer=answer, conn=conn)
     finally:
+        _close(browser)
         if close_after:
             conn.close()
+
+
+def _note_replay(conn: sqlite3.Connection, app_id: int, browser: BaseBrowser) -> None:
+    """A cloud run's recording, in the run's log: the one way to see what
+    happened on a form nobody here was watching."""
+    url = getattr(browser, "replay_url", None)
+    if url:
+        harness.trace(conn, app_id, -1, "browser", {"replay": url})
+
+
+def _close(browser: BaseBrowser) -> None:
+    """Close a cloud session when its run ends or parks: it is billed while
+    open, and a parked run can wait hours. Jev's tab stays — it is the person's
+    own Chrome, and they may want to look at the form."""
+    if getattr(browser, "close_after_run", False):
+        browser.close()
 
 
 def browser_for(job: dict, app_id: int, fixture: str | None = None) -> BaseBrowser:
@@ -128,7 +161,10 @@ def browser_for(job: dict, app_id: int, fixture: str | None = None) -> BaseBrows
     url = job.get("apply_url") or job.get("url")
     if not url:
         raise ValueError("job has no apply URL")
-    return PlaywrightBrowser(url, app_id)
+    if os.environ.get(BROWSER_ENV, "jev").lower() == "cloud":
+        from apply.cloud import CloudBrowser  # noqa: PLC0415
+        return CloudBrowser(url, app_id)
+    return JevBrowser(url, app_id)
 
 
 def pending(conn: sqlite3.Connection | None = None) -> list[dict]:

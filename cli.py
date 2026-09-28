@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Job Agent MVP — terminal interface.
 
-    python cli.py sync                  fill the jobs table (no API key needed)
+    python cli.py sync                  fill the jobs table: boards + LinkedIn (no API key needed)
     python cli.py verify                which boards are live
     python cli.py stats                 what's in the table
+    python cli.py supply                usable jobs per realistic search
+    python cli.py discover [--add]      find company boards from known employers
     python cli.py search "..."          5 jobs with reasons
     python cli.py parse-resume <pdf>    build master.json (run once)
+    python cli.py resume                build a resume from everything you've said
+    python cli.py career [kind text]    read or add a career fact
     python cli.py tailor <n>            tailor for result n, preview as text
     python cli.py apply <n> [<n>...]    start applications
     python cli.py answer <id> "..."     resume a parked application
@@ -27,9 +31,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import paths  # noqa: E402
 from engine import db  # noqa: E402
 
-LAST = HERE / "artifacts" / "last_search.json"
+LAST = paths.LAST_SEARCH
 
 
 def _save_last(picks: list[dict]) -> None:
@@ -55,14 +60,74 @@ def _pick(n: int) -> dict:
 
 def cmd_sync(args):
     from engine.sync import sync
-    r = asyncio.run(sync())
+    r = asyncio.run(sync(with_linkedin=not (args.boards_only or args.no_linkedin),
+                         linkedin_cap=args.linkedin_cap,
+                         with_adzuna=not (args.boards_only or args.no_adzuna),
+                         adzuna_calls=args.adzuna_calls,
+                         with_labels=not args.no_labels))
     print(f"\n{r['ok']}/{r['boards']} boards ok, {r['rows']} rows, "
           f"{r['closed']} closed")
+    ru = r.get("rules")
+    if ru:
+        print(f"Rule labels (no model) on {ru['read']} unread jobs: "
+              f"{ru['role_family']} role, {ru['level']} level, "
+              f"{ru['country']} country, {ru['work_mode']} work mode")
+    lab = r.get("labels")
+    if lab:
+        print(f"Labels: {lab['labelled']} jobs labelled"
+              + (f", stopped early ({lab['stopped']})" if lab["stopped"] else ""))
+    li = r.get("linkedin")
+    if li:
+        print(f"LinkedIn: {li.get('queued', 0)} new links from "
+              f"{li.get('searches', 0)} searches, {li.get('added', 0)} jobs added, "
+              f"{li['waiting']} still waiting for a description, "
+              f"{li['closed']} closed by age")
+        if li["blocked"]:
+            print(f"  LinkedIn stopped early ({li['blocked']}). Kept what it "
+                  f"had, closed nothing because of it. Try again later.")
+    az = r.get("adzuna")
+    if az and az.get("skipped"):
+        print(f"Adzuna: skipped ({az['skipped']})")
+    elif az:
+        print(f"Adzuna: {az['added']} jobs added from {az['calls']} calls, "
+              f"{az['repeats']} repeats read, {az['skipped_pages']} pages "
+              f"skipped by the page search, "
+              f"{az['duplicates']} already had from a fuller source, "
+              f"{az['closed']} closed by age, {az['superseded']} replaced by a "
+              f"fuller copy")
+        if az["blocked"]:
+            print(f"  Adzuna stopped early ({az['blocked']}). Kept what it "
+                  f"had, closed nothing because of it.")
+        if az.get("narrowed"):
+            print(f"  {az['narrowed']} window(s) narrowed a day: where the last "
+                  f"run stopped was past Adzuna's 100-page limit")
+        if az.get("stuck"):
+            print(f"  could not reach where these stopped, even one day wide "
+                  f"(split them): {', '.join(az['stuck'])}")
     print(f"table: {r['stats']}")
     if r["errors"]:
         print("failures (these closed nothing):")
         for e in r["errors"]:
             print(f"  {e}")
+
+
+def cmd_label(args):
+    import time
+    from engine import labels
+    conn = db.connect()
+    if args.redo:
+        conn.execute("UPDATE jobs SET label_hash = NULL")
+        conn.commit()
+    print(f"labelling with {labels.provider()} / {labels.model()}")
+    t = time.time()
+    r = labels.run(conn, limit=args.limit)
+    done, total = labels.coverage(conn)
+    print(f"\n{r['labelled']} labelled, {r['skipped']} skipped, "
+          f"{r['failed_batches']} failed batches in {time.time() - t:.0f}s")
+    if r["stopped"]:
+        print(f"stopped early: {r['stopped']}")
+    print(f"coverage: {done}/{total} open jobs labelled")
+    conn.close()
 
 
 def cmd_verify(args):
@@ -75,9 +140,98 @@ def cmd_verify(args):
     print(f"\n{len(live)}/{len(rows)} boards live")
 
 
+def cmd_discover(args):
+    """Guess board slugs for every employer Adzuna and LinkedIn named, ask each
+    platform, and (with --add) put the live Indian ones in boards.json."""
+    from engine import discover
+    from engine.sync import BOARDS
+    boards = json.loads(BOARDS.read_text())
+    if args.add:
+        _add_discovered(discover.live(discover.OUT), boards, args.min_india,
+                        set(args.skip or []))
+        return
+    have = {b["company"].lower() for b in boards}
+    if args.names_file:
+        # A hand-typed list: employers the table has not named yet.
+        lines = Path(args.names_file).read_text().splitlines()
+        names = list(dict.fromkeys(
+            n.strip() for n in lines
+            if n.strip() and not n.startswith("#") and n.strip().lower() not in have))
+    else:
+        conn = db.connect()
+        names = discover.companies(conn, have)
+        conn.close()
+    if args.limit:
+        names = names[:args.limit]
+    print(f"probing {len(names)} companies on "
+          f"{', '.join(args.platforms or discover.PROBES)}")
+    r = asyncio.run(discover.run(names, discover.OUT, platforms=args.platforms))
+    for platform, s in r.items():
+        print(f"  {platform:<16} {s['probed']:>5} probed  {s['live']:>4} live"
+              + (f"  stopped: {s['stopped']}" if s["stopped"] else ""))
+    print(f"\nanswers in {discover.OUT}; add them with: "
+          f"python cli.py discover --add")
+
+
+def _add_discovered(found: list[dict], boards: list[dict], min_india: int,
+                    skip: set[str]):
+    """Append live boards with Indian roles: one board per company (the one
+    with the most Indian roles, since `found` is sorted that way), only where
+    the board's own name (when it gives one) matches ours, never an
+    aggregator, and never a slug named in --skip."""
+    from engine import discover
+    from engine.sync import BOARDS
+    have = {(b["source"], b["slug"].lower()) for b in boards}
+    companies = {b["company"].lower() for b in boards}
+    added = []
+    for r in found:
+        key = (r["platform"], r["slug"].lower())
+        if (r.get("india") or 0) < min_india or key in have \
+                or r["company"].lower() in companies \
+                or r["slug"].lower() in skip | discover.NOT_EMPLOYERS:
+            continue
+        if not discover.same_company(r["company"], r.get("name")):
+            continue
+        boards.append({"company": r["company"], "source": r["platform"],
+                       "slug": r["slug"], "found_by": "discover"})
+        have.add(key)
+        companies.add(r["company"].lower())
+        added.append(r)
+    if added:
+        # Appended as lines, one board each, so the hand-typed ones above keep
+        # their layout and a diff shows exactly what discovery added.
+        text = BOARDS.read_text().rstrip()
+        assert text.endswith("]")
+        lines = ",\n".join("  " + json.dumps(boards[-len(added) + i], ensure_ascii=False)
+                           for i in range(len(added)))
+        BOARDS.write_text(text[:-1].rstrip() + ",\n\n" + lines + "\n]\n")
+        json.loads(BOARDS.read_text())          # still valid, or fail loudly
+    for r in added:
+        print(f"  + {r['company']:<32} {r['platform']:<16} {r['slug']:<24} "
+              f"{r['jobs']:>4} jobs, {r.get('india', 0)} in India")
+    print(f"\n{len(added)} boards added to {BOARDS.name}")
+
+
+def cmd_supply(args):
+    """Jobs the product can fully handle (full text + employer apply link,
+    last 14 days) for the searches beta users will make. The gate is 15."""
+    from engine import supply
+    conn = db.connect()
+    short = 0
+    for role, place, n in supply.report(conn, args.days):
+        mark = "ok  " if n >= supply.GATE else "SHORT"
+        short += n < supply.GATE
+        print(f"  {mark} {n:>4}  {role} @ {place}")
+    conn.close()
+    print(f"\n{short} search(es) under {supply.GATE}")
+
+
 def cmd_stats(args):
     conn = db.connect()
     print(db.stats(conn))
+    print("\nby source:")
+    for r in db.stats_by_source(conn):
+        print(f"  {r['source']:<11} {r['open']:>5} open  {r['companies']:>4} companies")
     print("\ntop cities:")
     for r in conn.execute("SELECT city, COUNT(*) n FROM jobs "
                           "WHERE closed_at IS NULL GROUP BY city "
@@ -86,9 +240,60 @@ def cmd_stats(args):
     conn.close()
 
 
+def cmd_cost(args):
+    """What the AI cost, per person and per task, from the tokens each call
+    saved (usage.py). Every profile is counted, evals and your own included,
+    because they all bill the same GLM account: the total is the number to
+    hold against the bigmodel.cn billing page for the same days."""
+    import usage
+    import paths as p_
+    dbs = [("you (terminal, web, labels)", p_.SHARED_DB)]
+    for f in sorted((p_.ROOT / "profiles").rglob("jobs.db")):
+        name = f.parent.relative_to(p_.ROOT / "profiles").as_posix()
+        kind = ("Telegram user " + name[3:] if name.startswith("tg-") else
+                "eval" if name.startswith("eval") else
+                "scenario" if name.startswith("scen") else "test")
+        dbs.append((f"{name} ({kind})" if not name.startswith("tg-") else kind, f))
+    head = (f"{'who':<34}{'calls':>6}{'new in':>10}{'cached':>10}{'out':>9}"
+            f"{'$':>9}{'₹':>8}")
+    days = None if args.all else args.days
+    print(f"AI cost, {'all time' if days is None else f'last {days} days'} "
+          f"(prices in usage.py, ₹{usage.RUPEES:g} per $)\n{head}")
+    total = {"calls": 0, "input": 0, "cached": 0, "output": 0, "usd": 0.0}
+    tasks: dict[str, float] = {}
+    for who, db_ in dbs:
+        rows = usage.summary(db_, days)
+        if not rows:
+            continue
+        t = {k: sum(r[k] for r in rows) for k in total}
+        for k in total:
+            total[k] += t[k]
+        for r in rows:
+            tasks[r["purpose"]] = tasks.get(r["purpose"], 0) + r["usd"]
+        print(f"{who[:33]:<34}{t['calls']:>6}{t['input']:>10,}{t['cached']:>10,}"
+              f"{t['output']:>9,}{t['usd']:>9.3f}{t['usd'] * usage.RUPEES:>8.1f}")
+        if args.detail:
+            for r in rows:
+                print(f"   {r['purpose'][:19]:<20}{r['model'][:11]:<11}{r['calls']:>6}"
+                      f"{r['input']:>10,}{r['cached']:>10,}{r['output']:>9,}"
+                      f"{r['usd']:>9.3f}")
+    print(f"{'TOTAL':<34}{total['calls']:>6}{total['input']:>10,}"
+          f"{total['cached']:>10,}{total['output']:>9,}{total['usd']:>9.3f}"
+          f"{total['usd'] * usage.RUPEES:>8.1f}")
+    if total["usd"]:
+        split = " · ".join(f"{k} {v / total['usd']:.0%}" for k, v in
+                           sorted(tasks.items(), key=lambda kv: -kv[1]))
+        print(f"\nby task: {split}")
+    print("\nHold the TOTAL against the bigmodel.cn billing page for the same "
+          "days. If they differ, fix PRICES in usage.py.")
+
+
 def cmd_search(args):
-    from search.run import search
-    result = search(" ".join(args.query))
+    from search.run import experience_years, search
+    conn = db.connect()
+    result = search(" ".join(args.query), conn=conn,
+                    fit_years=experience_years(conn), live=True)
+    conn.close()
     _save_last(result["picks"])
     print(result["text"])
     print(f"\n({result['candidates']} candidates considered)")
@@ -105,10 +310,43 @@ def cmd_parse_resume(args):
     # application starts with nothing attached.
     v.put("master_resume_path", str(Path(args.pdf).resolve()), source="resume")
     rows["master_resume_path"] = str(Path(args.pdf).resolve())
+    # The uploaded document goes on the record too. Without it the store
+    # starts empty, and the first generated resume would be everything they
+    # mentioned in chat and nothing they actually did.
+    import career
+    n = career.seed_from_master(master)
     print(f"wrote {parse.MASTER}")
     print(f"vault filled: {', '.join(rows)}")
+    print(f"career store seeded: {n} claims from the resume")
     print("\nRead master.json and fix it by hand. Every future resume comes "
           "from that file, so an error there propagates forever.")
+
+
+def cmd_resume(args):
+    """A resume with no job attached, from the career store."""
+    from resume import generate, tailor as t
+    result = generate.build(out_name=args.out)
+    print(t.preview(result))
+    print(f"\nPDF: {result['pdf']}")
+
+
+def cmd_career(args):
+    import career
+    if args.kind and args.text:
+        added = career.add(args.kind, " ".join(args.text), company=args.company,
+                           source="user")
+        print("added" if added else "already there")
+        return
+    rows = career.all(kind=args.kind)
+    if not rows:
+        print("nothing on the record yet — run parse-resume, or add one")
+        return
+    for r in rows:
+        where = f" [{r['company']}]" if r["company"] else ""
+        print(f"{r['id']:>4} {r['kind']:<14}{where} {r['text'][:80]}")
+        if r["heard_in"]:
+            print(f"      heard: {r['heard_in'][:72]!r}")
+    print(f"\n{len(rows)} claim(s)")
 
 
 def cmd_tailor(args):
@@ -229,6 +467,12 @@ def cmd_chat(args):
     chat.repl(fixture=args.fixture)
 
 
+def cmd_telegram(args):
+    """The chat on Telegram, one process per invited person (telegram_bot.py)."""
+    import telegram_bot
+    telegram_bot.serve()
+
+
 def cmd_web(args):
     """Same agent, same `chat.reply`, rendered in a browser instead."""
     import web
@@ -243,6 +487,10 @@ def cmd_doctor(args):
 
     blocked = False
 
+    # First line, before any rail: every check below is about *this* profile,
+    # and a green report against the wrong one is worse than a red one.
+    print(f"Profile\n  {paths.label()}\n")
+
     print("LLM providers")
     any_live = False
     for name in llm.PROVIDERS:
@@ -254,12 +502,25 @@ def cmd_doctor(args):
         print("  -> blocks: search, tailor, apply, reconcile, chat")
 
     print("\nBrowser")
-    try:
-        import playwright  # noqa: F401
-        print("  UP   playwright")
-    except ImportError:
-        print("  DOWN playwright   pip install playwright && playwright install chromium")
+    from apply.jev import Bridge, JEV_DIR
+    if Bridge._healthy():
+        print("  UP   jev          Chrome extension connected")
+    elif (JEV_DIR / "mcp" / "server.mjs").exists():
+        print("  DOWN jev          open Chrome and click the Jev icon "
+              "(the bridge starts itself when applying)")
+    else:
+        print(f"  DOWN jev          Jev Browser Control not found at {JEV_DIR}")
         print("  -> blocks: apply against a live form (fixtures still work)")
+        blocked = True
+    import os
+    from apply import cloud
+    from apply.agent import BROWSER_ENV
+    ok, detail = cloud.probe()
+    print(f"  {'UP  ' if ok else 'DOWN'} cloud        {detail}")
+    in_use = os.environ.get(BROWSER_ENV, "jev").lower()
+    print(f"       in use:      {in_use}  (set {BROWSER_ENV}=cloud|jev)")
+    if in_use == "cloud" and not ok:
+        print("  -> blocks: apply (the cloud browser is the one in use)")
         blocked = True
 
     print("\nResume")
@@ -268,12 +529,38 @@ def cmd_doctor(args):
         print(f"  {'UP  ' if up else 'DOWN'} {tool:<12} {up or 'not installed'}")
         if not up:
             blocked = True
-    master = HERE / "resume" / "master.json"
+    # paths.MASTER, not HERE — doctor has to ask the profile the question, or
+    # it reports a resume that this profile cannot actually read.
+    master = paths.MASTER
     print(f"  {'UP  ' if master.exists() else 'DOWN'} master.json  "
           f"{'ok' if master.exists() else 'run parse-resume'}")
 
+    print("\nLinkedIn (job supply, optional)")
+    from engine import linkedin
+    ok, detail = asyncio.run(linkedin.probe())
+    print(f"  {'UP  ' if ok else 'DOWN'} guest search  {detail}")
+    if not ok:
+        # Boards still work, so this narrows supply without blocking anything.
+        print("  -> sync still runs the boards; LinkedIn jobs just stop growing")
+
+    # No network call: the free tier is 250 calls a day, and a probe that
+    # spends one every time someone runs doctor spends them on nothing.
+    print("\nAdzuna (job supply, optional)")
+    from engine import adzuna
+    if adzuna.keys():
+        print("  UP   keys         ADZUNA_APP_ID / ADZUNA_APP_KEY set (not probed)")
+    else:
+        print("  DOWN keys         set ADZUNA_APP_ID and ADZUNA_APP_KEY "
+              "(free at developer.adzuna.com)")
+        print("  -> sync skips Adzuna; boards and LinkedIn still run")
+
     print("\nData")
     conn = db.connect()
+    from engine import labels
+    done, total = labels.coverage(conn)
+    print(f"  {'UP  ' if done else 'DOWN'} labels       {done}/{total} open jobs "
+          f"labelled via {labels.provider()}"
+          + ("" if done == total else "  -> python cli.py label"))
     s = db.stats(conn)
     ok = (s.get("open") or 0) > 0
     print(f"  {'UP  ' if ok else 'DOWN'} jobs table   {s}")
@@ -301,9 +588,51 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("sync").set_defaults(fn=cmd_sync)
+    s = sub.add_parser("sync", help="fill the jobs table: boards, then LinkedIn")
+    s.add_argument("--boards-only", action="store_true",
+                   help="skip LinkedIn (seconds instead of minutes)")
+    s.add_argument("--linkedin-cap", type=int, default=None,
+                   help="descriptions to fetch this run (default 300)")
+    s.add_argument("--no-labels", action="store_true",
+                   help="skip labelling new jobs")
+    s.add_argument("--no-adzuna", action="store_true",
+                   help="skip Adzuna (needs ADZUNA_APP_ID / ADZUNA_APP_KEY)")
+    s.add_argument("--no-linkedin", action="store_true",
+                   help="skip LinkedIn but still run boards and Adzuna "
+                        "(for when LinkedIn is answering 429)")
+    s.add_argument("--adzuna-calls", type=int, default=None,
+                   help="most Adzuna API calls this run; also runs it even if it ran today (free tier: 2,500 a month)")
+    s.set_defaults(fn=cmd_sync)
+
+    s = sub.add_parser("label", help="label jobs that have none (cheap model)")
+    s.add_argument("--limit", type=int, default=None)
+    s.add_argument("--redo", action="store_true",
+                   help="relabel every job, e.g. after changing the model")
+    s.set_defaults(fn=cmd_label)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("stats").set_defaults(fn=cmd_stats)
+    s = sub.add_parser("cost", help="what the AI cost, per person and task")
+    s.add_argument("--days", type=int, default=30)
+    s.add_argument("--all", action="store_true", help="all time")
+    s.add_argument("--detail", action="store_true", help="split by task and model")
+    s.set_defaults(fn=cmd_cost)
+    s = sub.add_parser("supply", help="usable jobs per realistic search")
+    s.add_argument("--days", type=int, default=14)
+    s.set_defaults(fn=cmd_supply)
+
+    s = sub.add_parser("discover", help="find company boards from known employers")
+    s.add_argument("--platforms", nargs="+", default=None,
+                   help="greenhouse lever ashby workable smartrecruiters")
+    s.add_argument("--limit", type=int, default=None, help="first n companies only")
+    s.add_argument("--names-file", default=None,
+                   help="probe these names (one per line) instead of the table's")
+    s.add_argument("--add", action="store_true",
+                   help="append live boards with Indian roles to boards.json")
+    s.add_argument("--min-india", type=int, default=1,
+                   help="Indian roles a board needs to be added (default 1)")
+    s.add_argument("--skip", nargs="+", default=None,
+                   help="slugs to leave out (a generic word that is not this company)")
+    s.set_defaults(fn=cmd_discover)
     sub.add_parser("pending").set_defaults(fn=cmd_pending)
     sub.add_parser("doctor").set_defaults(fn=cmd_doctor)
 
@@ -317,11 +646,24 @@ def main():
     s.add_argument("--no-open", action="store_true", help="do not open a browser")
     s.set_defaults(fn=cmd_web)
 
+    s = sub.add_parser("telegram", help="conversational mode, on Telegram (invited ids only)")
+    s.set_defaults(fn=cmd_telegram)
+
     s = sub.add_parser("search"); s.add_argument("query", nargs="+")
     s.set_defaults(fn=cmd_search)
 
     s = sub.add_parser("parse-resume"); s.add_argument("pdf")
     s.set_defaults(fn=cmd_parse_resume)
+
+    s = sub.add_parser("resume", help="build a resume from the career store")
+    s.add_argument("--out", default=None)
+    s.set_defaults(fn=cmd_resume)
+
+    s = sub.add_parser("career", help="read or add a career fact")
+    s.add_argument("kind", nargs="?", default=None)
+    s.add_argument("text", nargs="*")
+    s.add_argument("--company", default=None)
+    s.set_defaults(fn=cmd_career)
 
     s = sub.add_parser("tailor"); s.add_argument("n", type=int)
     s.set_defaults(fn=cmd_tailor)

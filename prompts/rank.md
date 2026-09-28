@@ -53,6 +53,13 @@ a market, a number one person is accountable for. That is knowable from the
 text. Whether it is the right number for this person is only knowable from what
 they said above.
 
+## Level
+
+A level they asked for is theirs, in any wording: "fresher", "entry level",
+"2025 passout" and "new grad" all mean junior. A job asking for 0-2 years suits
+a fresher; do not drop it for being junior. Drop on level only when the job is
+clearly above or below what they said.
+
 ## Reasons
 
 One line each. Say the specific thing that makes it a fit or a stretch, not a

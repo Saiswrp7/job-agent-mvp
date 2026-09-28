@@ -1,0 +1,19 @@
+{
+  "posted_within_days": 30,
+  "roles": [
+    "product manager",
+    "associate product manager",
+    "growth manager",
+    "growth product manager"
+  ],
+  "places": [
+    {"location": "Bengaluru, Karnataka, India"},
+    {"location": "Mumbai, Maharashtra, India"},
+    {"location": "Gurugram, Haryana, India"},
+    {"location": "New Delhi, Delhi, India"},
+    {"location": "Noida, Uttar Pradesh, India"},
+    {"location": "Pune, Maharashtra, India"},
+    {"location": "Hyderabad, Telangana, India"},
+    {"location": "India", "remote": true}
+  ]
+}

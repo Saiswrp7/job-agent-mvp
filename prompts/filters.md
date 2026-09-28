@@ -15,6 +15,10 @@ Return ONLY JSON, this exact shape:
   "posted_within_days": null,
   "must_mention": [],
   "companies": null,
+  "role_family": null,
+  "level": null,
+  "country": null,
+  "owns_pnl": null,
   "soft_criteria": ""
 }
 ```
@@ -36,8 +40,13 @@ their experience. Only what this message says.
 - `title_keywords` — the job title, plus obvious variants. "growth" →
   `["growth"]`. "PM" → `["product manager", "pm "]`. Keep it short; these are
   substring matches against the title.
-- `city` — one of: Bangalore, Mumbai, Delhi, Gurgaon, Noida, Hyderabad, Pune,
-  Chennai, Kolkata. Normalize Bengaluru → Bangalore, Gurugram → Gurgaon.
+- `city` — the city they named, whichever it is. Normalize Bengaluru →
+  Bangalore, Gurugram → Gurgaon. "Delhi NCR" or "NCR" → `"Delhi NCR"` (the
+  search expands it to Delhi, Gurgaon, Noida and the rest). Never leave it null because the city sounds
+  unlikely: a city with no jobs returns nothing, and nothing is the honest
+  answer. Null here means "search everywhere", which is not what they asked
+  for. A country is **not** a city — "in India" goes in `country`. A region
+  ("across Europe") goes in `soft_criteria`.
 - `company_type` — `"b2c"` or `"b2b"`, only if they said so.
 - `industry` — free text, matched loosely: "gaming", "fintech", "ecommerce".
 - `seniority` — one of `junior`, `senior`, `lead`, `head`. Only if stated.
@@ -47,6 +56,19 @@ their experience. Only what this message says.
   `["a/b test", "ab test", "split test", "experiment"]`. These order the
   results; they never exclude, so being generous costs nothing.
 - `companies` — only if they named specific companies.
+- `role_family` — the kind of work, as a list, from exactly these:
+  engineering, data, product, design, growth, crm_lifecycle, marketing, sales,
+  business_development, customer_success, support, operations, supply_chain,
+  finance, hr, legal, content, research, healthcare, education, admin, other.
+  Set it whenever they name a kind of work, alongside `title_keywords`: "UX
+  designer" → `["design"]`, "growth or product roles" → `["growth", "product"]`.
+  It widens the search to jobs with unusual titles; it never narrows it.
+- `level` — a list from: intern, junior, mid, senior, lead, leadership. Only if
+  they said it ("senior roles", "internships", "leadership positions"). Never
+  from their experience — that is handled separately.
+- `country` — the country they named, in English: "in India" → `"India"`.
+- `owns_pnl` — `true` only if they asked to own a P&L, revenue, or a business
+  line. Otherwise null.
 - `soft_criteria` — **everything the fields above cannot hold**, verbatim in
   plain English. "at companies that raised recently", "nothing too corporate",
   "where I'd own a full revenue line". This is passed to a later step that

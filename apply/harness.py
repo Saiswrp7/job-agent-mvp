@@ -109,12 +109,25 @@ def _run_tool(browser: BaseBrowser, name: str, args: dict) -> tuple[str, bool]:
         return f"ERROR: {type(exc).__name__}: {exc}", True
 
 
+def _block(obj):
+    """A reply block as the API takes it back.
+
+    `default=str` wrote SDK blocks as their repr — "ThinkingBlock(...)" — which
+    reloads as a string where the API needs an object. Nothing noticed while
+    the provider rarely returned thinking blocks; GLM 5.3 always does, so the
+    first resumed application after the switch was a 400 (2026-09-24).
+    """
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump(exclude_none=True)
+    return str(obj)
+
+
 def save(conn: sqlite3.Connection, app_id: int, history: list,
          status: str, question: str | None = None) -> None:
     conn.execute(
         "UPDATE applications SET log=?, status=?, question=?, "
         "updated_at=CURRENT_TIMESTAMP WHERE id=?",
-        (json.dumps(history, default=str), status, question, app_id),
+        (json.dumps(history, default=_block), status, question, app_id),
     )
     conn.commit()
 
@@ -160,6 +173,12 @@ def run(app_id: int, browser: BaseBrowser, system: str,
         client = llm.client()
         save(conn, app_id, history, "running")
 
+        # Did `submit` actually go through? Nothing used to record this, so the
+        # run ended as `done` whether it had submitted or been refused, and
+        # "done" reads as success to whatever displays it next. It reached a
+        # person as "all five are submitted" when nothing had been.
+        submitted = False
+
         for step in range(BUDGET):
             trace(conn, app_id, step, "prompt", {"messages": len(history)})
             llm.counted()      # this loop calls create() directly, not via llm
@@ -171,8 +190,10 @@ def run(app_id: int, browser: BaseBrowser, system: str,
                 tools=TOOLS,
                 messages=history,
                 thinking={"type": "adaptive"},
-                output_config={"effort": "high"},
+                output_config={"effort": llm.effort_level("high")},
             )
+            import usage
+            usage.record(reply, model=llm.MODEL(), purpose="apply")
 
             if reply.stop_reason == "refusal":
                 save(conn, app_id, history, "failed")
@@ -184,8 +205,13 @@ def run(app_id: int, browser: BaseBrowser, system: str,
 
             if reply.stop_reason != "tool_use":
                 text = "".join(b.text for b in reply.content if b.type == "text")
-                save(conn, app_id, history, "done")
-                return {"status": "done", "message": text.strip(), "steps": step}
+                # Named for what happened, never for the loop. `blocked` means
+                # the run reached its end without submitting — the ordinary
+                # outcome while ALLOW_SUBMIT is off, and not a failure.
+                status = "submitted" if submitted else "blocked"
+                save(conn, app_id, history, status)
+                return {"status": status, "submitted": submitted,
+                        "message": text.strip(), "steps": step}
 
             results = []
             for block in reply.content:
@@ -200,6 +226,11 @@ def run(app_id: int, browser: BaseBrowser, system: str,
                     trace(conn, app_id, step, "park", park.question)
                     return {"status": "waiting", "question": park.question,
                             "steps": step}
+                # Only a submit that returned without erroring counts. A
+                # REFUSED comes back as is_error, so the flag stays false and
+                # the run ends `blocked`.
+                if block.name == "submit" and not is_error:
+                    submitted = True
                 trace(conn, app_id, step, "tool_result", out[:2000])
                 results.append({"type": "tool_result", "tool_use_id": block.id,
                                 "content": out, "is_error": is_error})

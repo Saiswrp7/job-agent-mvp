@@ -1,0 +1,128 @@
+{
+ "greenhouse:8158862": [
+  {
+   "item": "8-10 years product management experience",
+   "match": [
+    "product management",
+    "senior product manager",
+    "product roadmap"
+   ]
+  },
+  {
+   "item": "Risk, identity & fraud domain experience",
+   "match": [
+    "fraud prevention",
+    "identity verification",
+    "risk management"
+   ]
+  },
+  {
+   "item": "APIs, SDKs & third-party integrations",
+   "match": [
+    "api",
+    "sdk",
+    "integrations"
+   ]
+  },
+  {
+   "item": "B2B platform / data products",
+   "match": [
+    "b2b",
+    "platform products",
+    "data products"
+   ]
+  },
+  {
+   "item": "GDPR/DPDPA compliance knowledge",
+   "match": [
+    "gdpr",
+    "dpdpa",
+    "compliance"
+   ]
+  }
+ ],
+ "lever:d4c4d777-d41b-4940-9407-e2100fb5dcd1": [
+  {
+   "item": "0-to-1 experience",
+   "match": [
+    "0-to-1",
+    "zero to one",
+    "built from scratch"
+   ]
+  },
+  {
+   "item": "DAU / engagement growth ownership",
+   "match": [
+    "dau",
+    "engagement",
+    "retention"
+   ]
+  },
+  {
+   "item": "Content ecosystem / content supply",
+   "match": [
+    "content",
+    "creator",
+    "content supply"
+   ]
+  },
+  {
+   "item": "Ranking / discovery algorithms",
+   "match": [
+    "ranking",
+    "discovery",
+    "recommendation"
+   ]
+  },
+  {
+   "item": "3-5 years product-led growth",
+   "match": [
+    "product-led growth",
+    "growth",
+    "4 years"
+   ]
+  }
+ ],
+ "lever:09022710-e79a-4cf0-8060-df0e1cd64263": [
+  {
+   "item": "partnerships / business development experience",
+   "match": [
+    "partnerships",
+    "business development",
+    "business development"
+   ]
+  },
+  {
+   "item": "4+ years in consumer internet / fintech",
+   "match": [
+    "fintech",
+    "consumer internet",
+    "4+ years"
+   ]
+  },
+  {
+   "item": "merchant or brand partnerships",
+   "match": [
+    "merchant partnerships",
+    "brand partnerships",
+    "merchant growth"
+   ]
+  },
+  {
+   "item": "account management / enterprise sales",
+   "match": [
+    "account management",
+    "enterprise sales",
+    "category management"
+   ]
+  },
+  {
+   "item": "upi / payments knowledge",
+   "match": [
+    "upi",
+    "payments",
+    "credit"
+   ]
+  }
+ ]
+}

@@ -24,9 +24,11 @@ import llm
 import vault
 from engine import db
 
+import paths
+
 HERE = Path(__file__).resolve().parent
-PROFILE = HERE / "profile.md"
-PLATFORMS = HERE / "platforms"
+PROFILE = paths.PROFILE
+PLATFORMS = paths.PLATFORMS
 
 SYSTEM = """You maintain a job-seeker's profile. Below are facts a model
 inferred from conversation today, plus what is already known.
@@ -63,13 +65,24 @@ def staged(conn) -> list[dict]:
         "WHERE promoted = 0 ORDER BY id")]
 
 
-def read_profile() -> str:
-    return PROFILE.read_text() if PROFILE.exists() else ""
+def read_profile(conn=None) -> str:
+    """Everything soft that is known about them: the nightly prose, then the
+    preference rows written live from chat. The rows are what makes this
+    non-empty today, since the nightly pass has not yet run for anyone."""
+    body = PROFILE.read_text() if PROFILE.exists() else ""
+    try:
+        from memory import prefs
+        rows = prefs.render(conn)
+    except Exception:                                  # noqa: BLE001
+        rows = ""
+    if rows:
+        body += ("\n\n" if body else "") + "## Preferences said in chat\n" + rows
+    return body
 
 
 def write_profile(lines: list[str]) -> None:
     PROFILE.parent.mkdir(parents=True, exist_ok=True)
-    body = read_profile()
+    body = PROFILE.read_text() if PROFILE.exists() else ""
     stamp = f"\n## {date.today().isoformat()}\n"
     body += stamp + "".join(f"- {line}\n" for line in lines)
     PROFILE.write_text(body)

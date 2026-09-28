@@ -173,6 +173,45 @@ def test_relax_runs_in_a_fixed_order():
     assert query.relax(query.normalize({})) is None
 
 
+def test_stated_is_what_the_user_said_not_what_normalize_filled_in():
+    # count and soft_criteria are excluded: count is the target the cascade
+    # chases, not a constraint on which jobs are eligible.
+    f = query.normalize({"city": "Bangalore", "count": 5,
+                         "soft_criteria": "nothing CRM-heavy"})
+    assert query.stated(f) == {"city"}
+    assert query.stated(query.normalize({})) == frozenset()
+
+
+def test_relax_never_drops_a_city_the_user_asked_for():
+    """The bug this exists for: "growth roles in bengalore" returned Noida.
+
+    Only 2 growth-titled jobs exist in Bangalore and count defaults to 5, so
+    the cascade ran out of levers and deleted the city to pad the list. The
+    person is never told, because four results look like four results.
+    """
+    f = query.normalize({"city": "Bangalore"})
+    assert query.relax(f, protect=query.stated(f)) is None, \
+        "a city the user named must never be relaxed away"
+    # Unprotected — e.g. a city inferred from their profile — may still widen.
+    widened, note = query.relax(f)
+    assert widened["city"] is None and "outside that city" in note
+
+
+def test_relax_protects_every_lever_the_user_named():
+    f = query.normalize({"must_mention": ["sql"], "posted_within_days": 7,
+                         "seniority": "senior", "industry": "fintech",
+                         "city": "Pune"})
+    assert query.relax(f, protect=query.stated(f)) is None
+
+
+def test_relax_still_widens_what_the_user_did_not_name():
+    # City came from the user; the 7-day window did not. The window gives.
+    f = query.normalize({"city": "Pune", "posted_within_days": 7})
+    widened, note = query.relax(f, protect=frozenset({"city"}))
+    assert widened["city"] == "Pune"
+    assert widened["posted_within_days"] == 90 and "90" in note
+
+
 # --- vault -----------------------------------------------------------------
 
 @pytest.mark.parametrize("label,key", [
@@ -327,40 +366,7 @@ def test_vault_never_stores_a_non_url_as_a_url():
     assert rows["email"] == "a@b.com"
 
 
-# --- fill_field must not claim a field it did not actually fill ------------
-
-class _DeadInput:
-    """An input that accepts a value and silently drops it, like Lever's
-    location autocomplete."""
-    def __init__(self): self.typed = None
-    def fill(self, v): self.typed = v
-    def input_value(self): return ""
-    def click(self): pass
-    def type(self, v, delay=None): pass
-    def press(self, k): pass
-    def count(self): return 0
-    def is_visible(self): return False
-    def select_option(self, **kw): pass
-    def check(self): pass
-
-
-def test_a_field_that_drops_the_value_is_reported_as_an_error():
-    """The bug this came from: the trace said 'filled location' while the form
-    showed it empty, so the submit guard counted a required field as done."""
-    from apply.browser import PlaywrightBrowser
-
-    b = PlaywrightBrowser.__new__(PlaywrightBrowser)   # no real browser
-    b.filled = {}
-    b._fields = [{"name": "location", "label": "Current location",
-                  "type": "text", "required": True}]
-    dead = _DeadInput()
-    b._locator = lambda name: dead
-    b.page = type("P", (), {"wait_for_timeout": lambda self, ms: None,
-                            "locator": lambda self, sel: dead})()
-
-    result = b.fill_field("location", "Bengaluru")
-    assert result.startswith("ERROR")
-    assert "location" not in b.filled        # the guard can now catch it
+# fill_field must not claim a field it did not fill: see tests/test_jev_browser.py
 
 
 # --- chat transcript -------------------------------------------------------
@@ -612,3 +618,506 @@ def test_a_flat_funnel_is_called_out(conn):
     shown = chatlog.render(chatlog.turns(conn), color=False)
     assert "670 open" in shown
     assert "no choice to make" in shown
+
+
+# --- addressing a job by name, not by position -----------------------------
+#
+# Every one of these failed in a recorded conversation. "apply to 1" started a
+# different job, twice at a different company, because the agent renumbers the
+# list it writes and the tools indexed the search order. A position cannot be
+# wrong — every n from 1 to 5 returns something — so the failure was silent.
+
+def test_two_jobs_never_share_a_name():
+    from search.rank import ref
+    a = ref({"company": "Paytm", "title": "Growth Management - UPI Growth"})
+    b = ref({"company": "Paytm", "title": "Growth Manager - Postpaid"})
+    assert a != b
+    assert a == "paytm-growth-management-upi-growth"
+
+
+def test_a_name_from_an_earlier_search_still_resolves():
+    """Two searches in one message used to be the worst case: the reply listed
+    both sets, `picks` held only the second, so a job from the first resolved
+    to whatever sat at that index in the second. Different company."""
+    import chat
+    state = {"by_ref": {}}
+    meesho = {"company": "Meesho", "title": "Manager - DAU Growth"}
+    cred = {"company": "CRED", "title": "Capital Partnerships"}
+    from search.rank import ref
+    state["by_ref"][ref(meesho)] = meesho          # first search
+    state["by_ref"][ref(cred)] = cred              # second search, same turn
+    assert chat._by_ref(state, "meesho-manager-dau-growth")["company"] == "Meesho"
+    assert chat._by_ref(state, "cred-capital-partnerships")["company"] == "CRED"
+
+
+def test_an_unknown_name_raises_instead_of_returning_a_job():
+    import chat
+    from search.rank import ref
+    job_ = {"company": "Paytm", "title": "Growth Manager - Postpaid"}
+    state = {"by_ref": {ref(job_): job_}}
+    with pytest.raises(KeyError) as exc:
+        chat._by_ref(state, "meesho-manager-dau-growth")
+    # The error has to name what IS available — a guess here fills in a real
+    # application form.
+    assert "paytm-growth-manager-postpaid" in str(exc.value)
+
+
+def test_the_agents_search_result_carries_no_numbers():
+    """A numbered tool result is a second numbered list in the context, in
+    search order, competing with the reply the person actually reads."""
+    from search import rank
+    picks = [{"title": "A", "company": "X", "reason": "r", "url": "u",
+              "posted_at": "2026-09-01", "city": "Bangalore"},
+             {"title": "B", "company": "Y", "reason": "r", "url": "u",
+              "posted_at": "2026-09-01", "city": "Noida"}]
+    agent_text = rank.format_results(picks, numbered=False)
+    assert not agent_text.lstrip().startswith("1.")
+    assert "[x-a]" in agent_text
+    # The CLI still numbers, for a person reading a terminal.
+    assert rank.format_results(picks).lstrip().startswith("1.")
+
+
+# --- an application says what happened, never what the loop did ------------
+
+def test_a_run_that_did_not_submit_is_not_called_done(conn):
+    """`done` meant "the loop stopped" and was read as "submitted". It reached
+    a person as "all five are submitted" while ALLOW_SUBMIT was off and the
+    apply agent's own message in the same string said it could not submit."""
+    import chat
+    job_ = {"title": "Growth Manager", "company": "Paytm", "city": "Noida"}
+    out = chat._application_result(3, job_, {"status": "blocked",
+                                             "message": "could not submit"})
+    assert "NOT SUBMITTED" in out
+    assert "done" not in out.lower()
+    # and it names the job, so a wrong match is visible in the sentence
+    assert "Growth Manager" in out and "Paytm" in out
+
+
+def test_only_a_real_submit_reads_as_submitted():
+    import chat
+    job_ = {"title": "Growth Manager", "company": "Paytm"}
+    assert "NOT SUBMITTED" in chat._application_result(1, job_, {"status": "waiting"})
+    assert "NOT SUBMITTED" in chat._application_result(1, job_, {"status": "failed"})
+    sent = chat._application_result(1, job_, {"status": "submitted"})
+    assert "SUBMITTED" in sent and "NOT SUBMITTED" not in sent
+
+
+def test_old_done_rows_become_blocked_not_submitted(tmp_path):
+    """Nothing has ever been submitted — ALLOW_SUBMIT has never been on — so
+    promoting these rows to `submitted` would invent history."""
+    import sqlite3
+    p = tmp_path / "old.db"
+    c = sqlite3.connect(p)
+    c.executescript(db.SCHEMA)
+    c.execute("INSERT INTO applications (source, source_id, company, title, "
+              "status) VALUES ('lever','1','Paytm','Growth Manager','done')")
+    c.commit(); c.close()
+    c = db.connect(p)
+    rows = [r[0] for r in c.execute("SELECT status FROM applications")]
+    assert rows == ["blocked"]
+    c.close()
+
+
+# --- the count they asked for, and filters they did not ---------------------
+
+@pytest.mark.parametrize("said,expected", [
+    ("find me 3 growth roles anywhere in India", 3),
+    ("show me 5 product jobs in Chennai", 5),
+    ("give me 4 jobs", 4),
+    # Not a count. This one is why the pattern is anchored to a verb rather
+    # than picking up any number in the sentence.
+    ("find 5 APM roles for someone with 2 years of experience", 5),
+    ("i need a job", None),
+    ("growth roles in India", None),
+])
+def test_the_number_they_asked_for_is_read_from_their_own_sentence(said, expected):
+    from search.run import wanted_count
+    assert wanted_count(said) == expected
+
+
+def test_a_filter_they_never_mentioned_is_reported():
+    """Say "i need a job" and the agent fills the city in from the vault. That
+    is reasonable; doing it silently is not — five Bangalore jobs look exactly
+    like five jobs."""
+    from search.run import added_without_asking
+    assert added_without_asking({"city": "Bangalore"}, "i need a job") == ["city Bangalore"]
+    # asked for remote, got a city as well
+    assert "city Bangalore" in added_without_asking(
+        {"city": "Bangalore", "remote": True},
+        "I want remote product roles at fintech companies")
+    # they named it themselves — nothing to report
+    assert added_without_asking({"city": "Chennai"},
+                                "find me 5 product jobs in Chennai") == []
+
+
+# --- a resume instruction has somewhere to go -------------------------------
+
+def test_what_they_asked_for_reaches_the_resume_builder(monkeypatch):
+    """The tool used to take only a job, so "emphasise my CRM work" was
+    dropped in transit — not refused, lost."""
+    from resume import tailor as t
+    seen = {}
+
+    def fake(system, user, **kw):
+        seen["user"] = user
+        return {"summary": "s", "experience": []}
+
+    monkeypatch.setattr(t.llm, "complete_json", fake)
+    master = {"summary": "s", "experience": [], "name": "X"}
+    t.tailor({"title": "PM", "company": "Paytm", "description": "d"},
+             master, instruction="lean harder on the revenue number")
+    assert "lean harder on the revenue number" in seen["user"]
+
+
+def test_an_instruction_that_needs_an_invented_fact_is_reverted_and_reported():
+    """Letting instructions through is only safe because this still fires."""
+    master = {"summary": "Growth Manager with 4 years.", "name": "X",
+              "experience": [{"company": "Lenskart", "title": "Growth Manager",
+                              "bullets": ["Owned the CRM revenue line."]}]}
+    patch = {"experience": [
+        {"index": 0, "rewrites": {"0": "Owned the CRM revenue line for 8 years."}}]}
+    out, notes = verify.apply_patch(master, patch)
+    assert out["experience"][0]["bullets"] == ["Owned the CRM revenue line."]
+    assert notes, "a reverted bullet must be reported, not silently dropped"
+
+
+def test_the_summary_is_guarded_like_a_bullet():
+    """It was not, and it is where "say I have 8 years" naturally lands: one
+    sentence at the top of the page, the first thing a recruiter reads."""
+    master = {"summary": "Growth Manager with 4 years.", "name": "X",
+              "experience": []}
+    out, notes = verify.apply_patch(
+        master, {"summary": "Growth Manager with 8 years."})
+    assert out["summary"] == "Growth Manager with 4 years."
+    assert any("summary" in n for n in notes)
+    # an honest rewrite still goes through
+    out2, notes2 = verify.apply_patch(
+        master, {"summary": "Growth Manager, 4 years, revenue and retention."})
+    assert "4 years" in out2["summary"] and not notes2
+
+
+# --- an instruction that was never attempted is still news ------------------
+#
+# `apply_patch` reports a rewrite it *caught*. It cannot report one that was
+# never tried. Asked to claim eight years, a model that quietly writes
+# "4+ years" produces no patch to revert, so the preview showed a clean resume
+# and said nothing. Silent compliance and silent refusal looked identical.
+
+def _four_year_resume() -> dict:
+    return {"summary": "Growth Manager with 4+ years.", "name": "X",
+            "experience": [{"company": "Lenskart", "title": "Growth Manager",
+                            "bullets": ["Owned the CRM revenue line."]}]}
+
+
+def test_an_instruction_quietly_declined_is_reported():
+    """The residual on fix 8: nothing to revert, so nothing was said."""
+    m = _four_year_resume()
+    notes = verify.instruction_outcome("say I have 8 years", m, m, [])
+    assert notes, "a declined instruction must be reported, not left silent"
+    assert "8" in notes[0]
+
+
+def test_an_instruction_that_landed_is_not_reported():
+    """A guard that fires on success is one nobody reads."""
+    before = _four_year_resume()
+    after = {**before, "summary": "Growth Manager with 4+ years, 40% lift."}
+    assert verify.instruction_outcome(
+        "lean harder on the 40% number", before, after, []) == []
+
+
+def test_a_pointer_at_a_bullet_is_not_read_as_a_claim():
+    """"make the 2nd bullet stronger" points at a line; it does not claim a
+    fact. Reading the 2 as a claim would fire this on every ordinary edit."""
+    before = _four_year_resume()
+    after = {**before, "experience": [
+        {**before["experience"][0], "bullets": ["Owned the CRM revenue line end to end."]}]}
+    assert verify.instruction_outcome(
+        "make the 2nd bullet stronger", before, after, []) == []
+
+
+def test_an_instruction_that_changed_nothing_at_all_is_reported():
+    """No revert, no new number, and an identical document. They asked for
+    something and got a resume that is byte-for-byte what they had."""
+    m = _four_year_resume()
+    notes = verify.instruction_outcome("emphasise the CRM work", m, m, [])
+    assert notes and "nothing in the resume changed" in notes[0]
+
+
+def test_a_reverted_number_is_not_reported_twice():
+    """apply_patch already told them; saying it again buries both."""
+    m = _four_year_resume()
+    notes = ["summary: reverted (invented number(s): ['8'])"]
+    assert verify.instruction_outcome("say I have 8 years", m, m, notes) == []
+
+
+def test_no_instruction_means_nothing_to_report():
+    m = _four_year_resume()
+    assert verify.instruction_outcome("", m, m, []) == []
+
+
+# --- the five log checks ----------------------------------------------------
+
+def _assertions():
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scenario-runs"))
+    import assertions
+    return assertions
+
+
+def test_count_check_catches_a_dropped_count():
+    """Bug 4: seven sentences with a count produced count=5 seven times."""
+    a = _assertions()
+    turn = {"user": "find me 3 growth roles", "assistant": "here are five",
+            "steps": [{"tool": "search_jobs",
+                       "funnel": {"filter": {"count": 5}}}]}
+    assert a.a3_count_reaches_filter(turn, None)
+    turn["steps"][0]["funnel"]["filter"]["count"] = 3
+    assert a.a3_count_reaches_filter(turn, None) == []
+
+
+def test_submitted_check_ignores_a_future_promise():
+    """"I'll submit all five" is a promise, not a claim. Flagging it would
+    fire the check on correct behaviour."""
+    a = _assertions()
+    promise = {"assistant": "Once you give me those, I'll submit all five.",
+               "steps": []}
+    assert a.a2_no_false_submitted(promise, None) == []
+    claim = {"assistant": "All five are submitted with your resume.",
+             "steps": []}
+    assert a.a2_no_false_submitted(claim, None)
+
+
+def test_submitted_check_allows_an_honest_negation():
+    a = _assertions()
+    honest = {"assistant": "Not submitted — two fields are missing.",
+              "steps": []}
+    assert a.a2_no_false_submitted(honest, None) == []
+
+
+def test_numbers_resolve_catches_same_company_different_role():
+    """The worst real case was Paytm -> Paytm. Comparing company alone hid it."""
+    a = _assertions()
+    prev = {"assistant": "1. Product Manager — Lending Product, Paytm\n"
+                         "2. Growth Manager — Postpaid, Paytm",
+            "picks_after": [
+                {"i": 1, "title": "Product Management - Paytm Insurance",
+                 "company": "Paytm"},
+                {"i": 2, "title": "Product Manager Lending Product",
+                 "company": "Paytm"}]}
+    turn = {"user": "tell me about 1",
+            "steps": [{"tool": "get_job", "input": {"n": 1}}]}
+    assert a.a1_numbers_resolve(turn, prev), "shown 1 is pick 2, not pick 1"
+
+
+def test_undisclosed_filter_check_accepts_a_disclosed_one():
+    a = _assertions()
+    turn = {"user": "i need a job",
+            "assistant": "You didn't say where, so I used Bangalore.",
+            "steps": [{"tool": "search_jobs",
+                       "funnel": {"filter": {"city": "Bangalore"}}}]}
+    assert a.a5_no_undisclosed_filter(turn, None) == []
+    turn["assistant"] = "Here are five roles."
+    assert a.a5_no_undisclosed_filter(turn, None)
+
+
+# --- the career store: what they did, and where each claim came from --------
+#
+# master.json is a document and a document cannot answer "did they ever say
+# this?" — which is the question the resume guard has to ask once the corpus
+# grows past the parsed PDF.
+
+@pytest.fixture
+def store(tmp_path, monkeypatch):
+    import career as c
+    conn = db.connect(tmp_path / "t.db")
+    yield c, conn
+    conn.close()
+
+
+def test_a_claim_keeps_the_message_it_came_from(store):
+    """Provenance is the whole design: a number is allowed onto a resume
+    because a row says who said it, not because a model sounded sure."""
+    c, conn = store
+    c.add("accomplishment", "Grew activation 18%", company="Paytm",
+          source="chat", heard_in="i grew activation 18% last year", conn=conn)
+    row = c.all(conn=conn)[0]
+    assert row["heard_in"] == "i grew activation 18% last year"
+    assert row["source"] == "chat"
+
+
+def test_the_same_fact_twice_is_not_two_rows(store):
+    c, conn = store
+    assert c.add("skill", "SQL", conn=conn) is True
+    assert c.add("skill", "SQL", conn=conn) is False
+    assert len(c.all(conn=conn)) == 1
+
+
+def test_a_stated_number_stops_being_invented(store):
+    """The point of the whole store. Before it, a number they told us in
+    conversation was reverted by the same test that blocks a made-up one."""
+    c, conn = store
+    original = "Owned the CRM revenue line."
+    rewritten = "Owned the CRM revenue line, lifting activation 18%."
+    assert verify.check_bullet(original, rewritten), "unsupported: must revert"
+
+    c.add("accomplishment", "Grew activation 18%", company="Paytm",
+          source="chat", heard_in="i grew activation 18%", conn=conn)
+    assert verify.check_bullet(original, rewritten, c.supported(conn)) == [], \
+        "they said it; the record backs it"
+
+
+def test_a_number_nobody_stated_is_still_invented(store):
+    """Moving the guard must not remove it."""
+    c, conn = store
+    c.add("accomplishment", "Grew activation 18%", conn=conn)
+    assert verify.check_bullet("Owned the CRM revenue line.",
+                               "Owned the CRM revenue line, up 92%.",
+                               c.supported(conn))
+
+
+def test_where_a_number_came_from_can_be_answered(store):
+    """A guard that only says no is one nobody can argue with."""
+    c, conn = store
+    c.add("metric", "activation up 18% in two quarters", company="Paytm",
+          source="chat", heard_in="activation went up 18% in two quarters",
+          conn=conn)
+    p = c.provenance("18%", conn)
+    assert p and p["heard_in"] == "activation went up 18% in two quarters"
+    assert c.provenance("92%", conn) is None
+
+
+def test_the_uploaded_resume_goes_on_the_record_too(store):
+    """Without seeding, the first generated resume is everything they
+    mentioned in chat and nothing they actually did."""
+    c, conn = store
+    master = {"name": "X", "skills": ["SQL"], "experience": [
+        {"company": "Lenskart", "title": "Growth Manager",
+         "bullets": ["Owned the CRM revenue line."]}]}
+    assert c.seed_from_master(master, conn) >= 3
+    kinds = {r["kind"] for r in c.all(conn=conn)}
+    assert {"role", "accomplishment", "skill"} <= kinds
+    assert all(r["source"] == "resume" for r in c.all(conn=conn))
+
+
+def test_trivia_never_reaches_the_extractor(store, monkeypatch):
+    """vault.stage() saving whole messages is why there are 27 staging rows
+    of "hi" and "why did you ask that?". A per-message model call that fires
+    on those is the most expensive thing in the product."""
+    c, conn = store
+    called = []
+    monkeypatch.setattr(c.llm, "complete_json",
+                        lambda *a, **k: called.append(1) or [])
+    for junk in ("hi", "ok", "thanks", "apply to 2", "?"):
+        assert c.capture(junk, conn) == []
+    assert not called, "no model call for a message that cannot hold a fact"
+
+
+def test_a_failing_extractor_never_breaks_the_turn(store, monkeypatch):
+    c, conn = store
+
+    def boom(*a, **k):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(c.llm, "complete_json", boom)
+    assert c.capture("i grew activation 18% at Paytm last year", conn) == []
+
+
+def test_capture_keeps_their_sentence_not_the_paraphrase(store, monkeypatch):
+    c, conn = store
+    monkeypatch.setattr(c.llm, "complete_json", lambda *a, **k: [
+        {"kind": "accomplishment", "text": "Grew activation 18%",
+         "company": "Paytm"}])
+    said = "so last year i grew activation by about 18% at paytm"
+    c.capture(said, conn)
+    row = c.all(conn=conn)[0]
+    assert row["text"] == "Grew activation 18%"      # goes on the resume
+    assert row["heard_in"] == said                   # shown when they ask why
+
+
+# --- a resume with no job attached ------------------------------------------
+
+def test_a_resume_can_be_built_from_the_record(store):
+    c, conn = store
+    from resume import generate
+    master = {"name": "X", "experience": [
+        {"company": "Lenskart", "title": "Growth Manager",
+         "bullets": ["Owned the CRM revenue line."]}]}
+    c.add("accomplishment", "Grew activation 18%", company="Lenskart",
+          source="chat", conn=conn)
+    built, unplaced = generate.from_career(master, conn)
+    assert built["experience"][0]["bullets"] == [
+        "Owned the CRM revenue line.", "Grew activation 18%"]
+    assert unplaced == []
+
+
+def test_an_accomplishment_with_no_company_is_handed_back_not_filed(store):
+    """Guessing which job a thing belongs to is inventing employment history."""
+    c, conn = store
+    from resume import generate
+    master = {"name": "X", "experience": [
+        {"company": "Lenskart", "title": "GM", "bullets": ["Owned CRM."]}]}
+    c.add("accomplishment", "Led a team of six", source="chat", conn=conn)
+    built, unplaced = generate.from_career(master, conn)
+    assert built["experience"][0]["bullets"] == ["Owned CRM."]
+    assert len(unplaced) == 1 and "six" in unplaced[0]["text"]
+
+
+def test_the_parsed_resume_is_not_duplicated_into_itself(store):
+    """Seeded rows are source=resume and must not be appended a second time."""
+    c, conn = store
+    from resume import generate
+    master = {"name": "X", "experience": [
+        {"company": "Lenskart", "title": "GM", "bullets": ["Owned CRM."]}]}
+    c.seed_from_master(master, conn)
+    built, _ = generate.from_career(master, conn)
+    assert built["experience"][0]["bullets"] == ["Owned CRM."]
+
+
+def test_a_tool_name_they_stated_is_allowed_too(store):
+    """Names were left out of `supported` at first and the split was
+    invisible: the store held the skill, the number path worked, and the
+    bullet was still reverted."""
+    c, conn = store
+    orig = "Owned the CRM revenue line."
+    rew = "Owned the CRM revenue line, tracked in Amplitude."
+    assert verify.check_bullet(orig, rew, c.supported(conn)), "not stated yet"
+    c.add("skill", "Amplitude", source="user",
+          heard_in="i used Amplitude daily", conn=conn)
+    assert verify.check_bullet(orig, rew, c.supported(conn)) == []
+
+
+def test_a_company_they_never_worked_at_is_still_blocked(store):
+    c, conn = store
+    c.add("skill", "Amplitude", source="user", conn=conn)
+    assert verify.check_bullet("Owned the CRM revenue line.",
+                               "Owned the CRM revenue line at Google.",
+                               c.supported(conn))
+
+
+def test_where_a_name_came_from_can_be_answered(store):
+    c, conn = store
+    c.add("skill", "Amplitude", source="user",
+          heard_in="i used Amplitude daily", conn=conn)
+    assert c.provenance("Amplitude", conn)["heard_in"] == "i used Amplitude daily"
+
+
+def test_the_user_can_overrule_the_guard_by_saying_it(store):
+    """The guard is there to stop the model inventing, not to stop the person
+    describing their own career. The system has seen one PDF; they lived the
+    whole thing, and work that never made that document is the usual reason
+    for a gap. Saying so plainly must be enough."""
+    c, conn = store
+    orig, rew = "Growth Manager with 4+ years.", "Growth Manager with 8 years."
+    assert verify.check_bullet(orig, rew, c.supported(conn)), "not stated: blocked"
+
+    c.add("role", "8 years of experience", source="user",
+          heard_in="yes, 8 including the years before this job", conn=conn)
+    assert verify.check_bullet(orig, rew, c.supported(conn)) == [], \
+        "they said it themselves; it goes on"
+    assert c.provenance("8", conn)["source"] == "user"
+
+
+def test_the_decline_note_names_the_way_out(store):
+    """A note that says no and stops leaves them arguing with a wall."""
+    m = {"summary": "Growth Manager with 4+ years.", "experience": []}
+    note = verify.instruction_outcome("say I have 8 years", m, m, [])[0]
+    assert "remember_experience" in note

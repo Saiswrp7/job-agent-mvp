@@ -1,0 +1,261 @@
+# Indian startups and India-heavy tech employers that hire PMs, growth,
+# design and analysts. Hand-typed 2026-09-28 as discovery input: names only,
+# `python cli.py discover --names-file engine/india_candidates.txt` asks the
+# boards. A name here that has no public board simply answers 404.
+Razorpay
+Zepto
+Groww
+PhonePe
+Zomato
+Blinkit
+Swiggy
+Dream11
+Dream Sports
+ShareChat
+Moj
+Unacademy
+upGrad
+Cars24
+Spinny
+Urban Company
+Rapido
+Jupiter
+Slice
+Zerodha
+Upstox
+Smallcase
+INDmoney
+Jar
+Fampay
+OneCard
+Uni Cards
+Navi
+Paytm
+Policybazaar
+PB Fintech
+Acko
+Digit Insurance
+Ditto
+Zeta
+Juspay
+Cashfree
+Setu
+M2P Fintech
+Perfios
+Khatabook
+OkCredit
+BharatPe
+Open Financial
+Niyo
+Freo
+KreditBee
+Kissht
+MoneyView
+Lendingkart
+Rupeek
+Groww
+Meesho
+Flipkart
+Myntra
+Nykaa
+Lenskart
+Mamaearth
+Honasa
+boAt
+Licious
+FreshToHome
+Country Delight
+BigBasket
+Dunzo
+Swiggy Instamart
+Zepto
+Udaan
+Jumbotail
+Ninjacart
+DealShare
+CityMall
+Shiprocket
+Delhivery
+Porter
+Shadowfax
+Ola
+Ola Electric
+Ather Energy
+Yulu
+Bounce
+Rebel Foods
+Curefit
+Cult.fit
+HealthifyMe
+Practo
+PharmEasy
+Tata 1mg
+Pristyn Care
+Innovaccer
+Qure.ai
+CureBay
+Physics Wallah
+Byjus
+Vedantu
+Eruditus
+Scaler
+InterviewBit
+Simplilearn
+Classplus
+Teachmint
+LEAD School
+Leap Scholar
+Leverage Edu
+Masai School
+Sprinklr
+Freshworks
+Zoho
+Chargebee
+Postman
+BrowserStack
+Hasura
+Whatfix
+MoEngage
+CleverTap
+WebEngage
+Netcore Cloud
+Darwinbox
+Keka
+Leena AI
+Yellow.ai
+Haptik
+Gupshup
+Exotel
+Ozonetel
+LambdaTest
+Mindtickle
+Druva
+Icertis
+Uniphore
+Observe.AI
+Sarvam AI
+Krutrim
+Rephrase.ai
+Glean
+Atlan
+Hevo Data
+Innovaccer
+Amagi
+Capillary Technologies
+Unbxd
+Zenoti
+Rocketlane
+Spyne
+Plum
+Loop Health
+Even Healthcare
+Pocket FM
+Kuku FM
+STAGE
+Eloelo
+Josh
+VerSe Innovation
+DailyHunt
+InMobi
+Glance
+Games24x7
+MPL
+Mobile Premier League
+Nazara
+Winzo
+Zupee
+Rooter
+Loco
+Headout
+MakeMyTrip
+Goibibo
+ixigo
+Cleartrip
+EaseMyTrip
+OYO
+Zostel
+NoBroker
+Housing.com
+Square Yards
+Magicbricks
+Livspace
+HomeLane
+Furlenco
+Rentomojo
+Pepperfry
+Urban Ladder
+CarDekho
+Droom
+Park+
+InsuranceDekho
+Turtlemint
+Coverfox
+Infra.Market
+OfBusiness
+Moglix
+Zetwerk
+Bizongo
+Vegrow
+DeHaat
+AgroStar
+Arya.ag
+Apna
+WorkIndia
+Instahyre
+Cutshort
+Hirect
+Pepper Content
+Airmeet
+Hubilo
+Zluri
+Kapture CX
+SuperOps
+Fyle
+Clear
+ClearTax
+Vymo
+Signzy
+IDfy
+Bureau
+Jupiter Money
+Park Plus
+Games 24x7
+Sharechat
+Tata Digital
+Tata Neu
+Jio Platforms
+Reliance Retail
+Airtel Digital
+Paytm Money
+Angel One
+Dhan
+5paisa
+Groww Invest
+Bajaj Finserv Health
+Info Edge
+Naukri
+Swiggy Genie
+Uber India
+Atlassian
+Intuit
+Adobe
+Salesforce
+Walmart Global Tech
+Target India
+PayPal
+Visa
+Mastercard
+Amex
+Goldman Sachs
+Rippling
+Plivo
+Chargebee
+Wingify
+VWO
+Instamojo
+Pine Labs
+PayU
+Mswipe
+Innoviti
+Recko
+Ezetap
