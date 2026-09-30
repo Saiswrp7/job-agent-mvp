@@ -320,7 +320,7 @@ def test_untested_sites_get_the_link(monkeypatch, conn):
     from engine import adapters
     monkeypatch.setattr(chat.apply_agent, "browser_for", lambda *a, **k: None)
     monkeypatch.setattr(chat.apply_agent, "start", lambda *a, **k: {"status": "blocked"})
-    monkeypatch.delenv("APPLY_SITES", raising=False)
+    monkeypatch.setenv("APPLY_SITES", "lever,keka")   # smartrecruiters left off the list
     row = adapters._row(source="smartrecruiters", source_id="143429", company="Swiggy",
                         title="Growth", location="Bengaluru", description="x",
                         url="https://jobs.smartrecruiters.com/SWIGGY/143429",
@@ -331,5 +331,5 @@ def test_untested_sites_get_the_link(monkeypatch, conn):
     out = chat.run_tool("start_application", {"ref": "j"}, state, conn)
     assert out.startswith("NOT STARTED") and "SWIGGY/143429" in out
     assert not sites.can_fill("smartrecruiters") and sites.can_fill("keka")
-    monkeypatch.setenv("APPLY_SITES", "smartrecruiters")
-    assert sites.can_fill("smartrecruiters") and not sites.can_fill("keka")
+    monkeypatch.delenv("APPLY_SITES")
+    assert sites.can_fill("smartrecruiters")          # passed the cloud eval 30 Sep

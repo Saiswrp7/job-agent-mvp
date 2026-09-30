@@ -31,17 +31,13 @@ TESTED = {
                   "'Apply for this job here' open the form (0/5 before); a required "
                   "video question, where a form has one, cannot be answered",
     "recruitee": "4/4 plus 1 dead job link, after 'Send' was taught as a submit button (0/5 before)",
+    "smartrecruiters": "5/5 in Browserbase (30 Sep): resume autofill fills page 1 incl. "
+                       "experience/education, next_page to page 2, Submit found (0/5 before)",
     "breezy": "5/5 after 'Apply To Position', next_page for its 'Continue' page and "
               "skipping its off-screen spam-trap field (0/5 before)",
 }
 #: Failed or not yet shown to pass. They get the link and a tailored resume.
-NOT_YET = {
-    "smartrecruiters": "0/5 counted. Two forms filled page 1 with no required field "
-                       "empty and stopped only because that eval run had no next_page "
-                       "step; three could not open (Browserbase free minutes used up). "
-                       "A manual cloud run on Swiggy reached the Submit page via the "
-                       "resume autofill + next_page. Needs one cloud eval to pass.",
-}
+NOT_YET: dict[str, str] = {}
 
 
 def tested() -> set[str]:
