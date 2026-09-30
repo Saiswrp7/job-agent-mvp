@@ -260,13 +260,17 @@ def offline_search(monkeypatch):
     return box
 
 
-def test_short_results_go_live_and_new_jobs_are_shown(conn, offline_search):
+def test_short_results_do_not_go_live_while_linkedin_is_out_of_search(conn, offline_search):
+    """A live LinkedIn search adds LinkedIn rows, and LinkedIn rows are not
+    shown (they cannot be checked for still being open). So a short result
+    stays short and honest instead of waiting on a search nobody would see."""
+    from engine import db
+    assert "linkedin" in db.AGGREGATORS
     offline_search["filters"] = {"title_keywords": ["ux designer"], "city": "Kochi"}
     offline_search["live_adds"] = ["k1", "k2"]
     r = run_mod.search("UX designer jobs in Kochi", conn=conn, live=True)
-    assert offline_search["live_calls"] == [("ux designer", "Kochi, India", False)]
-    assert {p["source_id"] for p in r["picks"]} == {"k1", "k2"}
-    assert any("live" in n for n in r["notes"])
+    assert offline_search["live_calls"] == []
+    assert not any("searched LinkedIn live" in n for n in r["notes"])
 
 
 def test_every_ask_is_saved_even_when_found(conn, offline_search):

@@ -14,7 +14,7 @@ import sqlite3
 
 import llm
 import vault
-from apply import harness
+from apply import confirm, harness, pagecheck
 from apply.browser import BaseBrowser, ManualBrowser
 from apply.jev import JevBrowser
 
@@ -34,9 +34,13 @@ def create(job: dict, resume_path: str | None = None,
         # applications to the same company.
         # `submitted` is excluded too: that one is finished, and a second row
         # for it would be a duplicate application rather than a retry.
+        # `no_form` and `sign_in` never opened a form, so a retry is fresh.
+        # `unconfirmed` is NOT excluded: it may have been sent, and a second
+        # row would be a second application.
         existing = conn.execute(
             "SELECT id FROM applications WHERE source=? AND source_id=? "
-            "AND status NOT IN ('submitted', 'failed') ORDER BY id LIMIT 1",
+            "AND status NOT IN ('submitted', 'failed', 'no_form', 'sign_in') "
+            "ORDER BY id LIMIT 1",
             (job.get("source"), str(job.get("source_id")))).fetchone()
         if existing is not None:
             return existing[0]
@@ -97,6 +101,10 @@ def start(app_id: int, job: dict, browser: BaseBrowser,
     conn = conn or db.connect()
     try:
         _note_replay(conn, app_id, browser)
+        browser.approval = confirm.Approval(conn, app_id, job)
+        stop = _no_form_here(conn, app_id, job, browser)
+        if stop:
+            return stop
         pre = preflight(browser, conn)
         system = system_prompt(job, pre["known"], resume_path)
 
@@ -125,6 +133,10 @@ def resume_run(app_id: int, answer: str, browser: BaseBrowser,
         job = {"title": row["title"], "company": row["company"],
                "apply_url": row["apply_url"]}
         _note_replay(conn, app_id, browser)
+        browser.approval = confirm.Approval(conn, app_id, job)
+        stop = _no_form_here(conn, app_id, job, browser)
+        if stop:
+            return stop
         pre = preflight(browser, conn)
         system = system_prompt(job, pre["known"], row["resume_path"])
         # Every resume opens the form afresh, so what was typed before the
@@ -137,6 +149,35 @@ def resume_run(app_id: int, answer: str, browser: BaseBrowser,
         _close(browser)
         if close_after:
             conn.close()
+
+
+def _no_form_here(conn: sqlite3.Connection, app_id: int, job: dict,
+                  browser: BaseBrowser) -> dict | None:
+    """Decided in code before the model starts: is there a form to fill?
+
+    First the page's own Apply button is pressed if it shows a job
+    description. Then a password field means a sign-in wall, and no fields at
+    all means no form. Either ends the run here with the link. Left to the
+    model, an empty page became "you need to sign in" (Clickpost) and a
+    press of "Apply With Indeed" recorded as submitted (Swiggy)."""
+    opened = browser.open_form()
+    if opened:
+        harness.trace(conn, app_id, -1, "browser", {"opened": opened})
+    st = browser.page_state()
+    if not st:
+        return None                   # this backend cannot tell; the agent reads
+    link = job.get("apply_url") or job.get("url")
+    harness.trace(conn, app_id, -1, "page", {k: st.get(k) for k in
+                                             ("url", "fields", "password", "captcha", "buttons")})
+    if st.get("password"):
+        msg = f"{browser.SIGN_IN} Link: {link}"
+        status = "sign_in"
+    elif st.get("fields", 0) == 0:
+        msg, status = pagecheck.no_form(job.get("company"), link), "no_form"
+    else:
+        return None
+    harness.save(conn, app_id, [], status, None)
+    return {"status": status, "message": msg}
 
 
 def _note_replay(conn: sqlite3.Connection, app_id: int, browser: BaseBrowser) -> None:

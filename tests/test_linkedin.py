@@ -265,10 +265,15 @@ def test_age_closing_never_touches_board_jobs(conn):
 # --- search sees them ------------------------------------------------------
 
 def test_untagged_company_passes_a_b2c_filter_tagged_b2b_does_not(conn):
+    # Untagged is unknown, not a mismatch. It was LinkedIn's case; now it is
+    # every board the dataset added, none of which carry tags. (LinkedIn rows
+    # themselves are no longer searched.)
+    recent = (__import__("datetime").date.today()
+              - __import__("datetime").timedelta(days=3)).isoformat()
     for sid, ctype in (("li", None), ("b2b", "b2b"), ("b2c", "b2c")):
-        row = adapters._row(source="linkedin", source_id=sid, company=sid,
+        row = adapters._row(source="greenhouse", source_id=sid, company=sid,
                             title="Growth Manager", location="Bangalore",
-                            description="x", url="u", posted_at="2026-09-20",
+                            description="x", url="u", posted_at=recent,
                             meta={"type": ctype})
         db.upsert(conn, [row])
     rows, _ = query.search({"company_type": "b2c"}, conn)

@@ -207,7 +207,9 @@ def test_probe_stops_a_platform_that_keeps_refusing(tmp_path):
 def add(conn, **kw):
     base = dict(source="adzuna", source_id="1", company="Acme", title="Product Manager",
                 location="Bangalore, Karnataka", description="x", url="u",
-                posted_at="2026-09-25", department="IT Jobs")
+                posted_at=(__import__("datetime").date.today()
+                           - __import__("datetime").timedelta(days=4)).isoformat(),
+                department="IT Jobs")
     db.upsert(conn, [adapters._row(**{k: v for k, v in {**base, **kw}.items()
                                       if k != "department"})
                      | {"department": kw.get("department", base["department"])}])
@@ -267,8 +269,9 @@ def test_a_rule_label_never_hides_a_job_whose_title_fits(conn):
     """The search rule for labels: title OR label. A rule-labelled job must
     still come back for a title search that names it."""
     from search import query
-    add(conn, title="Growth Marketing Analyst")      # rules give no family
-    add(conn, source_id="2", title="Product Marketing Manager")
+    # Board rows: Adzuna rows are no longer searched at all.
+    add(conn, source="lever", title="Growth Marketing Analyst")  # rules give no family
+    add(conn, source="lever", source_id="2", title="Product Marketing Manager")
     rules.run(conn)
     rows, _ = query.search({"title_keywords": ["product"], "role_family": ["product"]},
                            conn=conn)

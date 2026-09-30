@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 
+from engine import db
 from search import filters as filters_mod
 from search import query, rank
 
@@ -256,7 +257,11 @@ def search(message: str, *, profile: str = "", conn=None,
     callers that pass True, which is how the scenario harness keeps a recorded
     run repeatable."""
     import os
-    live = live and os.environ.get("JOB_AGENT_LIVE", "1") != "0"
+    # A live LinkedIn search adds LinkedIn rows, and LinkedIn is out of search
+    # (it cannot be checked for still being open): nothing it adds would be
+    # shown. It comes back on if LinkedIn ever leaves db.AGGREGATORS.
+    live = (live and os.environ.get("JOB_AGENT_LIVE", "1") != "0"
+            and "linkedin" not in db.AGGREGATORS)
     # What they actually typed, when the caller has it. The chat agent
     # paraphrases `message` before this is reached, so anything checked against
     # their own words has to be checked against this instead.
@@ -377,7 +382,7 @@ def search(message: str, *, profile: str = "", conn=None,
     open_jobs = 0
     if conn is not None:
         row = conn.execute(
-            "SELECT COUNT(*) FROM jobs WHERE closed_at IS NULL").fetchone()
+            f"SELECT COUNT(*) FROM jobs WHERE {db.visible()}").fetchone()
         open_jobs = row[0] if row else 0
 
     return {

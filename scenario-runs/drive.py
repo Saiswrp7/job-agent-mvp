@@ -262,6 +262,9 @@ def run_one(scen: dict) -> dict:
     import importlib
 
     os.environ["JOB_AGENT_HOME"] = f"profiles/scen-{scen['profile']}"
+    # These profiles hold the jobs the conversations were recorded with:
+    # search shows what was open then, not "listed in the last 48 hours".
+    os.environ["JOB_AGENT_FROZEN_JOBS"] = "1"
 
     # Re-import under the new HOME. Modules cache paths at import time, so a
     # scenario that switches profile must reload them or it reads the last

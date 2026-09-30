@@ -37,6 +37,7 @@ import urllib.request
 from pathlib import Path
 
 import paths
+from apply import pagecheck
 from apply.browser import SHOTS, BaseBrowser
 
 PORT = int(os.environ.get("JBC_PORT", "10522"))
@@ -397,23 +398,94 @@ class JevBrowser(BaseBrowser):
                 out[name] = _clean(el.get("value", ""))
         return out
 
+    # --- the page, for code ----------------------------------------------
+
+    def page_state(self) -> dict:
+        try:
+            snap = self._call("snapshot", full=True)["page"]
+        except Exception:                             # noqa: BLE001
+            return {}
+        els = snap.get("elements", [])
+        try:
+            uploads = len(self._uploads())
+        except Exception:                             # noqa: BLE001
+            uploads = 0
+        try:
+            text = self._call("read", format="text", limit=6000).get("content") or ""
+        except Exception:                             # noqa: BLE001
+            text = ""
+        buttons = [e for e in els if e.get("role") in ("button", "link") and e.get("label")]
+        return {"url": snap.get("url", ""), "title": snap.get("title", ""),
+                "fields": sum(1 for e in els if self._kind(e)) + uploads,
+                "password": any((e.get("inputType") or "").lower() == "password" for e in els),
+                "captcha": bool(re.search(r"captcha", text, re.I)) and not buttons,
+                "buttons": [b["label"] for b in buttons], "refs": [b["ref"] for b in buttons],
+                "text": text}
+
+    def open_form(self, tries: int = 2) -> str:
+        """See CloudBrowser.open_form: a job page's own Apply button."""
+        done = []
+        for _ in range(tries):
+            st = self.page_state()
+            if not st or st.get("fields", 0) >= 2 or st.get("password"):
+                break
+            i = pagecheck.entry_button(st["buttons"])
+            if i is None:
+                break
+            self._call("click", ref=st["refs"][i])
+            done.append(st["buttons"][i])
+            time.sleep(3)
+        return (f"pressed {' then '.join(repr(d) for d in done)} to open the form"
+                if done else "")
+
+    def describe(self, st: dict | None = None, limit: int = 700) -> str:
+        st = st if st is not None else self.page_state()
+        if not st:
+            return "(could not read the page)"
+        bits = [f"URL: {st.get('url')}", f"Form fields a person could fill: {st.get('fields', 0)}"]
+        if st.get("password"):
+            bits.append("It has a PASSWORD field: this is a sign-in or sign-up page.")
+        if st.get("buttons"):
+            bits.append(f"Buttons: {st['buttons'][:15]}")
+        bits.append(f"Text: {(st.get('text') or '')[:limit]}")
+        return "\n".join(bits)
+
     def submit(self) -> str:
         # The guard first, always: required fields, then ALLOW_SUBMIT.
         self._guard_submit(self._fields or self.read_form())
-        button = next((e for e in self._elements()
-                       if e.get("role") == "button" and _SUBMIT.search(e.get("label") or "")),
-                      None)
-        if button is None:
-            return "ERROR: no submit button found on the page"
-        page = self._call("click", ref=button["ref"]).get("page") or {}
-        return f"submitted — now at {page.get('url', '?')}"
+        st = self.page_state()
+        i = pagecheck.submit_button(st.get("buttons", []))
+        if i is None:
+            nxt = pagecheck.next_button(st.get("buttons", []))
+            if nxt:
+                return (f"ERROR: NOT SENT. This form goes on to another page (it "
+                        f"has a {nxt!r} button), and I can only fill one page. "
+                        f"Nothing was sent. Stop and say so.")
+            return "ERROR: NOT SENT. No submit button found on the page."
+        label = st["buttons"][i]
+        self._call("click", ref=st["refs"][i])
+        after = {}
+        for _ in range(10):
+            time.sleep(1)
+            after = self.page_state()
+            if pagecheck.confirmed(st.get("text", ""), after.get("text", ""),
+                                   st.get("url", ""), after.get("url", "")):
+                return f"submitted — the page confirms it ({after.get('url')})"
+        if after.get("url") == st.get("url") and after.get("fields", 0) >= max(1, st.get("fields", 0) - 1):
+            said = pagecheck.complaints(after.get("text", ""))
+            return (f"ERROR: NOT SENT. Pressed {label!r} and the form is still there"
+                    + (f"; the page says: {said}" if said else ", with no confirmation")
+                    + ". Fix what it says, or stop and say so.")
+        return (f"unconfirmed — pressed {label!r} and the page changed, but it does "
+                f"not say the application was received. It may or may not have gone "
+                f"through: do not submit again. Page now: {(after.get('text') or '')[:300]}")
 
     def screenshot(self) -> str:
         SHOTS.mkdir(parents=True, exist_ok=True)
         shot = self._call("screenshot")
         p = SHOTS / f"app_{self.app_id or 0}.jpg"
         p.write_bytes(base64.b64decode(shot["data"]))
-        return str(p)
+        return f"saved {p}\nWhat the page shows:\n{self.describe()}"
 
     def close(self) -> None:
         try:

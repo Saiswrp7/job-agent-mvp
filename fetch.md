@@ -204,3 +204,36 @@ What gets the same result without either:
 
 A job that stays Adzuna-only keeps its snippet and "Jobs by Adzuna" credit;
 it can be found and ranked, not tailored for or applied to by the agent.
+
+---
+
+## The engine (built 2026-09-29): replaces the hourly cron
+
+`python cli.py engine` is an always-on process (like the bot). It re-reads
+every employer board, keeps India's last 30 days, and closes what the
+employer took down. `engine/loop.py` has the diagram; the rules:
+
+- **Company list** = `boards` table. Seeded from `boards.json` + the free
+  ats-scrapers dataset (`cli.py registry pull` → `engine/dataset_boards.csv`,
+  `cli.py registry seed`). ~2,600 India boards across 24 ATSs. Staffing firms
+  and Darwinbox/Uber/Avature/Tesla/Meta/TikTok/ByteDance (bot-wall bypass in
+  the library) are left out; `httpcloak` is not installed.
+- **Readers**: our 5 adapters for GH/Lever/Ashby/Workable/SR; `ats-scrapers`
+  0.3.0 (pinned) for Workday, Oracle, SuccessFactors, Keka and the rest via
+  `engine/ats_bridge.py`. Workday is filtered to India with the site's own
+  location facet and reports whether the read was whole (2,000 cap).
+- **Stored**: India (or remote-open) and posted ≤ 30 days ago. Descriptions
+  that cost a request per job are read once, for new jobs only. A job with no
+  date seen on a board's first read is of unknown age and not stored; one
+  that appears later is dated the day we first saw it.
+- **Removed**: missing from a complete read → re-read in 15 min → missing
+  again → closed. A failed read closes nothing; 3×404 retires the board. A
+  list that suddenly loses most jobs proves nothing (drop guard).
+- **Shown** (`db.VISIBLE`): open, not Adzuna/LinkedIn, listed in the last
+  48 h, posted in the last 30 days. Nightly prune deletes the rest.
+- **Apply kind**: `form` (we fill), `account` (sign-up first: Workday,
+  Oracle, SF...), `link` (job board/email). Search puts forms first;
+  `start_application` starts only forms; `get_job`/`tailor_resume`/
+  `start_application` re-read the row and say GONE if it closed.
+
+Replays over recorded jobs set `JOB_AGENT_FROZEN_JOBS=1` (scenario-runs).

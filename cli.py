@@ -214,16 +214,59 @@ def _add_discovered(found: list[dict], boards: list[dict], min_india: int,
 
 def cmd_supply(args):
     """Jobs the product can fully handle (full text + employer apply link,
-    last 14 days) for the searches beta users will make. The gate is 15."""
+    open and listed now, last 30 days) for the searches beta users will
+    make, split by what applying takes. The gate is 15 forms we can fill."""
     from engine import supply
     conn = db.connect()
     short = 0
-    for role, place, n in supply.report(conn, args.days):
-        mark = "ok  " if n >= supply.GATE else "SHORT"
-        short += n < supply.GATE
-        print(f"  {mark} {n:>4}  {role} @ {place}")
+    print(f"  {'':5} {'form':>5} {'account':>8}")
+    for role, place, form, account in supply.report(conn, args.days):
+        mark = "ok  " if form >= supply.GATE else "SHORT"
+        short += form < supply.GATE
+        print(f"  {mark} {form:>5} {account:>8}  {role} @ {place}")
     conn.close()
-    print(f"\n{short} search(es) under {supply.GATE}")
+    print(f"\n{short} search(es) under {supply.GATE} forms"
+          f"\n(form: we fill it; account: their site wants a sign-up first)")
+
+
+def cmd_engine(args):
+    """The always-on engine, or where it stands."""
+    from engine import loop
+    if args.action == "status":
+        conn = db.connect()
+        s = loop.status(conn)
+        conn.close()
+        print(f"boards {s['boards']}  due now {s['due_now']}  never read "
+              f"{s['never_read']}  failing {s['failing']}  retired {s['retired']}")
+        print(f"last 24 h: {s['reads_24h']} reads, {s['ok_24h'] or 0} ok, "
+              f"{s['new_24h'] or 0} new jobs, {s['closed_24h'] or 0} closed")
+        print(f"searchable now: {s['visible']}  by apply kind: {s['by_kind']}")
+        for f in s["failing_boards"]:
+            print(f"  failing x{f['fail_streak']}: {f['source']:<15} "
+                  f"{f['company'][:28]:<28} {(f['last_error'] or '')[:70]}")
+        return
+    totals = asyncio.run(loop.run(once=args.action == "once", batch=args.batch))
+    print(f"\n{totals}")
+
+
+def cmd_registry(args):
+    """The company list: pull the dataset's India employers, add them."""
+    from engine import registry
+    if args.action == "pull":
+        r = registry.pull()
+        print(f"{r['employers']} employers with India jobs in the dataset; "
+              f"{r['boards']} boards matched to a careers site, "
+              f"{r['unmatched']} not matched, {r['staffing']} staffing firms "
+              f"left out -> {registry.DATASET_BOARDS.name}")
+        return
+    conn = db.connect()
+    if args.action == "seed":
+        print(registry.sync_json(conn))
+        print(registry.seed(conn))
+    for r in registry.counts(conn):
+        print(f"  {r['source']:<16} {r['boards']:>5} boards  {r['read_ok'] or 0:>5} "
+              f"read ok  {r['failing'] or 0:>4} failing  {r['retired'] or 0:>3} retired")
+    conn.close()
 
 
 def cmd_stats(args):
@@ -617,8 +660,18 @@ def main():
     s.add_argument("--detail", action="store_true", help="split by task and model")
     s.set_defaults(fn=cmd_cost)
     s = sub.add_parser("supply", help="usable jobs per realistic search")
-    s.add_argument("--days", type=int, default=14)
+    s.add_argument("--days", type=int, default=30)
     s.set_defaults(fn=cmd_supply)
+    s = sub.add_parser("engine", help="re-read every board: run | once | status")
+    s.add_argument("action", nargs="?", default="run", choices=["run", "once", "status"],
+                   help="run: forever; once: until nothing is due; status: where it stands")
+    s.add_argument("--batch", type=int, default=5000, help="most boards picked per round")
+    s.set_defaults(fn=cmd_engine)
+    s = sub.add_parser("registry", help="the company list: pull | seed | show")
+    s.add_argument("action", nargs="?", default="show", choices=["pull", "seed", "show"],
+                   help="pull: dataset -> engine/dataset_boards.csv (network); "
+                        "seed: boards.json + that csv -> boards table")
+    s.set_defaults(fn=cmd_registry)
 
     s = sub.add_parser("discover", help="find company boards from known employers")
     s.add_argument("--platforms", nargs="+", default=None,

@@ -33,6 +33,7 @@ import usage
 import paths
 import vault
 from apply import agent as apply_agent
+from apply import confirm, sites
 from engine import db
 from memory import reconcile
 
@@ -426,6 +427,9 @@ _NEWS = {
     "blocked": "form filled, not submitted",
     "waiting": "paused, it needs an answer from you",
     "failed": "stopped before finishing",
+    "unconfirmed": "submit pressed, but the site never confirmed it; check your email before trying again",
+    "no_form": "no application form found, nothing filled or sent",
+    "sign_in": "the site wants a sign-in first, nothing filled or sent",
 }
 
 
@@ -433,7 +437,14 @@ def news_lines(news: list[dict]) -> str:
     out = []
     for r in news:
         detail = (r.get("outcome") or "").strip()
+        if detail.startswith(confirm.READY):
+            # The answers they are asked to approve: all of them, or the
+            # question cannot be answered.
+            out.append(f"Update — {r['title']} at {r['company']}: {detail}")
+            continue
         first = re.split(r"(?<=[.!?])\s", detail)[0] if detail else ""
+        if "http" in detail and "http" not in first:
+            first = detail          # a link later on is the useful part
         out.append(f"Update — {r['title']} at {r['company']}: "
                    f"{_NEWS.get(r['status'], r['status'])}."
                    + (f" {first}" if first else ""))
@@ -670,6 +681,39 @@ def _by_ref(state: dict, ref: str) -> dict:
     )
 
 
+def _gone(conn: sqlite3.Connection, job: dict, state: dict) -> str | None:
+    """None if the job is still open, else what to tell them instead.
+
+    A result lives in the conversation (`by_ref`) from the search that found
+    it, and the engine may have closed it since: the employer took it off
+    their careers site, or it passed 30 days. So a tool about to act on a job
+    reads the table again first, and nobody gets a resume tailored to, or an
+    application started for, a job that no longer exists. The fresh row's
+    apply link and apply kind replace the ones from the search.
+
+    A fixture run rehearses against a saved form, where the job's being live
+    is not the question, so it is left alone.
+    """
+    if state.get("fixture") or not job.get("source") or job.get("source_id") is None:
+        return None
+    row = conn.execute(
+        "SELECT closed_at, apply_kind, apply_url, url FROM jobs "
+        "WHERE source = ? AND source_id = ?",
+        (job["source"], str(job["source_id"]))).fetchone()
+    what = f"{job.get('title')} at {job.get('company')}"
+    if row is None:
+        return (f"GONE: {what} is no longer in the job list: it closed or is "
+                f"more than 30 days old. Tell them it is no longer open. Do "
+                f"not tailor for it or apply to it.")
+    if row["closed_at"]:
+        return (f"GONE: {job.get('company')} took {job.get('title')} off their "
+                f"careers site ({str(row['closed_at'])[:10]}). Tell them it is "
+                f"no longer open. Do not tailor for it or apply to it.")
+    job["apply_kind"] = row["apply_kind"]
+    job["apply_url"] = row["apply_url"] or row["url"] or job.get("apply_url")
+    return None
+
+
 #: What the model is told an application run ended as. Every line says the
 #: outcome in words that cannot be read as anything else.
 #:
@@ -683,6 +727,11 @@ _OUTCOME = {
     "blocked":   "NOT SUBMITTED — the run finished without sending anything.",
     "waiting":   "NOT SUBMITTED — parked, waiting on an answer.",
     "failed":    "NOT SUBMITTED — the run failed.",
+    "unconfirmed": ("MAYBE SENT — submit was pressed but the site never confirmed "
+                    "it. Tell them to check their email for a confirmation, and "
+                    "not to apply again until they have."),
+    "no_form":   "NOT SUBMITTED — no application form on the page; nothing was filled.",
+    "sign_in":   "NOT SUBMITTED — the site wants a sign-in first; nothing was filled.",
     "running":   "NOT SUBMITTED — still running.",
     "queued":    "NOT SUBMITTED — waiting for a free slot to start.",
 }
@@ -819,15 +868,31 @@ def fix_links(text: str, jobs: list[dict]) -> str:
         last = b
     out.append(text[last:])
     fixed = "".join(out)
+    hosts = frozenset(_host(u) for u in known)
     return _URL.sub(lambda m: m.group(0) if m.group(0) in known
-                    or not _looks_like_job(m.group(0)) else "", fixed)
+                    or not _looks_like_job(m.group(0), hosts) else "", fixed)
 
 
-def _looks_like_job(url: str) -> bool:
-    """Job-board links are the ones a model can mix up; anything else (a help
-    page it was told about) is left alone."""
-    return bool(re.search(r"linkedin\.com/jobs|adzuna\.|greenhouse\.io|lever\.co|"
-                          r"ashbyhq\.com|smartrecruiters\.com|workable\.com", url))
+_JOB_HOSTS = re.compile(
+    r"linkedin\.com/jobs|adzuna\.|greenhouse\.io|lever\.co|ashbyhq\.com|"
+    r"smartrecruiters\.com|workable\.com|myworkdayjobs\.com|oraclecloud\.com|"
+    r"keka\.com|successfactors\.|jobs2web\.com|icims\.com|recruitee\.com|"
+    r"teamtailor\.com|breezy\.hr|bamboohr\.com|pinpointhq\.com|"
+    r"recruiterbox\.com|rippling\.com|jobvite\.com|paycomonline\.net|"
+    r"dayforcehcm\.com|ultipro\.com|csod\.com", re.I)
+
+
+def _host(url: str) -> str:
+    m = re.match(r"https?://([^/?#]+)", url or "")
+    return m.group(1).lower() if m else ""
+
+
+def _looks_like_job(url: str, hosts: frozenset[str] = frozenset()) -> bool:
+    """Job links are the ones a model can mix up; anything else (a help page
+    it was told about) is left alone. A job link is one on a careers-site
+    host we know, or on the same host as a job this reply is about: many
+    employers serve their ATS from their own domain (careers.ey.com)."""
+    return bool(_JOB_HOSTS.search(url)) or _host(url) in hosts
 
 
 _LOCAL_PATH = re.compile(r"!?\[[^\]]*\]\((/[^)]+)\)|(?<![\w/])(/(?:Users|home|private|tmp|var)/\S+)")
@@ -927,6 +992,8 @@ def run_tool(name: str, args: dict, state: dict,
 
     if name == "get_job":
         job = _by_ref(state, args["ref"])
+        if (gone := _gone(conn, job, state)):
+            return gone
         # Adzuna's terms ask for the credit, and its description is only a
         # snippet: said here so the agent does not present it as the whole ad.
         via = ("\nJobs by Adzuna. The description below is a short snippet, "
@@ -959,6 +1026,8 @@ def run_tool(name: str, args: dict, state: dict,
     if name == "tailor_resume":
         from resume import tailor as t
         job = _by_ref(state, args["ref"])
+        if (gone := _gone(conn, job, state)):
+            return gone
         layout, heads_up = _pick_layout(args, conn)
         if layout is None:
             return heads_up
@@ -1014,6 +1083,30 @@ def run_tool(name: str, args: dict, state: dict,
 
     if name == "start_application":
         job = _by_ref(state, args["ref"])
+        if (gone := _gone(conn, job, state)):
+            return gone
+        # Only a form the agent can fill starts a run, and it is decided here,
+        # before the resume question, so nobody is asked which resume to send
+        # to a site we will not open. The person is on a phone: for the rest,
+        # the link and a tailored resume are the whole of what we can give.
+        kind = job.get("apply_kind")
+        link = job.get("apply_url") or job.get("url")
+        if not state.get("fixture") and kind == "account":
+            return (f"NOT STARTED: {job.get('company')}'s careers site wants an "
+                    f"account before anyone can apply, and signing up for them "
+                    f"is not built yet. Give them the link to apply themselves: "
+                    f"{link} . Offer a resume tailored to this job for it.")
+        if not state.get("fixture") and kind == "link":
+            return (f"NOT STARTED: this job is applied to on another site, not "
+                    f"a form we can fill. Give them the link: {link} . Offer a "
+                    f"resume tailored to this job for it.")
+        # A form, but on a site our filler has not passed the form eval on
+        # (apply/sites.py). SmartRecruiters and Keka went live untested and
+        # the first runs there sent nothing while one was recorded as sent.
+        if not state.get("fixture") and kind == "form" and not sites.can_fill(job.get("source")):
+            return (f"NOT STARTED: {job.get('company')}'s form is on a site we "
+                    f"cannot fill reliably yet. Give them the link to apply "
+                    f"themselves: {link} . Offer a resume tailored to this job for it.")
 
         # Which resume goes out is a decision, not a fallback. It used to be
         # `args or last tailored or master`, so whatever happened to be lying
@@ -1145,6 +1238,17 @@ def run_tool(name: str, args: dict, state: dict,
                "apply_url": row["apply_url"], "source": row["source"],
                "source_id": row["source_id"]}
         fixture, answer = state.get("fixture"), args["answer"]
+        if (row["question"] or "").startswith(confirm.READY):
+            # The one answer that sends an application is read from what they
+            # typed, never from the model's `answer`: a model that passes
+            # "yes" for them is exactly what this step exists to stop.
+            if confirm.said_submit(state.get("user_message")):
+                confirm.approve(conn, app_id)
+                answer = "The person said submit. Send it exactly as they saw it."
+            else:
+                answer = (f"The person did not say submit. Their reply: "
+                          f"{state.get('user_message') or answer!r}. Make the change "
+                          f"they asked for, then call submit again so they can see it.")
 
         def work(c: sqlite3.Connection) -> dict:
             browser = apply_agent.browser_for(job, app_id, fixture=fixture)

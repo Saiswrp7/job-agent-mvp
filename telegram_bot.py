@@ -372,10 +372,16 @@ class Worker:
         for row in self.unreported(self.conn):
             text = self.news([row])
             shot = self.shots / f"app_{row['id']}.png"
+            # A photo caption holds 1,024 characters; an approval question
+            # lists every answer, so it goes as its own message after the photo.
+            long = len(text) > 900
             if shot.exists():
-                self.bot.send_photo(self.chat_id, shot, text)
+                self.bot.send_photo(self.chat_id, shot,
+                                    text.split("\n")[0][:900] if long else text)
+                if long:
+                    self.bot.send(self.chat_id, text[:4000])
             else:
-                self.bot.send(self.chat_id, text)
+                self.bot.send(self.chat_id, text[:4000])
 
 
 def work(user_id: int) -> None:

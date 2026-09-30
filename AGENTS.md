@@ -133,6 +133,23 @@ screenshot()                 → image
 
 Six. Jev sits behind them and never appears in a tool definition.
 
+**Decided in code, not by the model (2026-09-30, after the first live runs
+sent nothing and one was recorded as sent):**
+
+- Before the model starts, `agent._no_form_here` presses the job page's own
+  Apply button if the page is a job description (Keka), then ends the run as
+  `sign_in` (a password field) or `no_form` (no fields) with the link.
+- `read_form` reads inside web components (SmartRecruiters' shadow DOM).
+- `screenshot` returns the page in words (URL, fields, buttons, text): the
+  apply model reads text only, and handed a file name it guessed "sign-in".
+- `submit` never presses an apply-with-Indeed/LinkedIn button, refuses a form
+  that goes on to a Next page, and says `submitted` only when the page
+  confirms it. A click that changed the page without a confirmation is
+  `unconfirmed` (may have gone; never retried). Rules: `apply/pagecheck.py`.
+- Only sites that passed the form eval (`evals/apply_forms.py`, real forms,
+  never submitted) are applied to: `apply/sites.py`. The rest get the link
+  and a tailored resume.
+
 ### Context
 
 **In:**

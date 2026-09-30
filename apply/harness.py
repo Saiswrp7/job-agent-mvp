@@ -21,6 +21,7 @@ import json
 import sqlite3
 
 import llm
+from apply import pagecheck
 from apply.browser import BaseBrowser, Park, SubmitRefused
 from engine import db
 
@@ -69,6 +70,14 @@ TOOLS = [
     {
         "name": "submit",
         "description": "Submit the application. Only when every required field is filled.",
+        "input_schema": {"type": "object", "properties": {},
+                         "additionalProperties": False},
+    },
+    {
+        "name": "next_page",
+        "description": ("Press Next/Continue on a form that goes on to another page, "
+                        "after every required field on this page is filled. Returns "
+                        "the next page's fields. Never use it to send: that is submit."),
         "input_schema": {"type": "object", "properties": {},
                          "additionalProperties": False},
     },
@@ -178,6 +187,9 @@ def run(app_id: int, browser: BaseBrowser, system: str,
         # "done" reads as success to whatever displays it next. It reached a
         # person as "all five are submitted" when nothing had been.
         submitted = False
+        #: A click that changed the page without it saying "received". Kept
+        #: apart from `blocked`: it may have been sent, so no retry.
+        unconfirmed = False
 
         for step in range(BUDGET):
             trace(conn, app_id, step, "prompt", {"messages": len(history)})
@@ -208,7 +220,13 @@ def run(app_id: int, browser: BaseBrowser, system: str,
                 # Named for what happened, never for the loop. `blocked` means
                 # the run reached its end without submitting — the ordinary
                 # outcome while ALLOW_SUBMIT is off, and not a failure.
-                status = "submitted" if submitted else "blocked"
+                status = ("submitted" if submitted else
+                          "unconfirmed" if unconfirmed else "blocked")
+                # The model's last line is what the person reads. Swiggy's
+                # said "The application was submitted" over a run that sent
+                # nothing; code has the last word on that.
+                if status == "blocked" and pagecheck.claims_sent(text):
+                    text = pagecheck.NOT_SENT
                 save(conn, app_id, history, status)
                 return {"status": status, "submitted": submitted,
                         "message": text.strip(), "steps": step}
@@ -226,11 +244,14 @@ def run(app_id: int, browser: BaseBrowser, system: str,
                     trace(conn, app_id, step, "park", park.question)
                     return {"status": "waiting", "question": park.question,
                             "steps": step}
-                # Only a submit that returned without erroring counts. A
-                # REFUSED comes back as is_error, so the flag stays false and
-                # the run ends `blocked`.
-                if block.name == "submit" and not is_error:
-                    submitted = True
+                # Only a submit the page confirmed counts. A REFUSED comes back
+                # as is_error; an "ERROR: NOT SENT" comes back as plain text,
+                # and used to count as sent because it was not is_error.
+                if block.name in ("submit", "next_page") and not is_error:
+                    if out.startswith("submitted"):
+                        submitted = True
+                    elif out.startswith("unconfirmed"):
+                        unconfirmed = True
                 trace(conn, app_id, step, "tool_result", out[:2000])
                 results.append({"type": "tool_result", "tool_use_id": block.id,
                                 "content": out, "is_error": is_error})

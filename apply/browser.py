@@ -71,6 +71,9 @@ class BaseBrowser:
     def __init__(self, app_id: int | None = None):
         self.app_id = app_id
         self.filled: dict[str, str] = {}
+        #: apply/confirm.Approval, attached by the apply agent. Without one,
+        #: nothing is ever sent: no path to a real submit skips the person.
+        self.approval = None
 
     # --- the six -------------------------------------------------------
     def read_form(self) -> list[dict]:
@@ -110,6 +113,24 @@ class BaseBrowser:
     def screenshot(self) -> str:
         raise NotImplementedError
 
+    # --- the page, for code ----------------------------------------------
+    #: What opening the page took (an Apply button pressed), for the log.
+    opened = ""
+
+    def page_state(self) -> dict:
+        """{url, fields, password, captcha, buttons, text}. Empty when the
+        backend cannot tell; callers then fall back to what read_form found."""
+        return {}
+
+    def open_form(self) -> str:
+        return ""
+
+    def next_page(self) -> str:
+        return "ERROR: this browser cannot go to a next page; stop and say so."
+
+    def describe(self) -> str:
+        return ""
+
     # --- shared guard --------------------------------------------------
     def current_values(self) -> dict:
         """What the form actually holds right now.
@@ -128,11 +149,16 @@ class BaseBrowser:
                    if f.get("required") and not values.get(f["name"])]
         if missing:
             raise SubmitRefused(f"required fields still empty: {missing}")
-        if os.environ.get(SUBMIT_ENV) != "1":
-            raise SubmitRefused(
-                f"{SUBMIT_ENV} is not set — refusing to submit a real "
-                f"application. Everything up to this point ran."
-            )
+        from apply import confirm
+        why = confirm.not_allowed()
+        if why:
+            raise SubmitRefused(why)
+        if self.approval is None:
+            raise SubmitRefused("no approval step attached — nothing is sent "
+                                "without the person saying submit")
+        # Parks the run with the filled answers unless the person approved
+        # exactly these. Raises Park, which the harness saves as `waiting`.
+        self.approval.check(values, fields)
 
 
 class ManualBrowser(BaseBrowser):

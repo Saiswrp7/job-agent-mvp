@@ -36,11 +36,16 @@ def conn():
     c.close()
 
 
+#: Inside the 30-day window whatever day the tests run.
+RECENT = (__import__("datetime").date.today()
+          - __import__("datetime").timedelta(days=9)).isoformat()
+
+
 def job(**kw):
     base = dict(source="lever", source_id="1", company="Zupee",
                 title="Growth Manager", location="Bangalore, India",
                 description="Own the monetisation funnel. 3-5 years.",
-                url="https://x", posted_at="2026-09-20")
+                url="https://x", posted_at=RECENT)
     base.update(kw)
     return adapters._row(**base)
 
@@ -166,11 +171,19 @@ def test_closed_jobs_never_returned(conn):
 def test_relax_runs_in_a_fixed_order():
     f = query.normalize({"must_mention": ["sql"], "posted_within_days": 45,
                          "city": "Bangalore"})
+    assert f["posted_within_days"] == 30          # the table holds 30 days
     f, note = query.relax(f)
     assert "skill" in note and f["must_mention"] is None
     f, note = query.relax(f)
-    assert "90" in note
+    assert "outside that city" in note and f["posted_within_days"] == 30
     assert query.relax(query.normalize({})) is None
+
+
+def test_the_posting_window_is_never_widened():
+    """Nothing older than 30 days is kept, and "latest" means latest: a sparse
+    result is never padded with older jobs."""
+    f = query.normalize({"posted_within_days": 7})
+    assert query.relax(f) is None
 
 
 def test_stated_is_what_the_user_said_not_what_normalize_filled_in():
@@ -205,11 +218,11 @@ def test_relax_protects_every_lever_the_user_named():
 
 
 def test_relax_still_widens_what_the_user_did_not_name():
-    # City came from the user; the 7-day window did not. The window gives.
-    f = query.normalize({"city": "Pune", "posted_within_days": 7})
+    # City came from the user; the seniority did not. The seniority gives.
+    f = query.normalize({"city": "Pune", "seniority": "senior"})
     widened, note = query.relax(f, protect=frozenset({"city"}))
     assert widened["city"] == "Pune"
-    assert widened["posted_within_days"] == 90 and "90" in note
+    assert widened["seniority"] is None and "seniority" in note
 
 
 # --- vault -----------------------------------------------------------------
@@ -318,8 +331,14 @@ def test_submit_refuses_without_the_env_flag(browser, monkeypatch):
         browser.submit()
 
 
-def test_submit_works_when_armed(browser, monkeypatch):
+def test_submit_works_when_armed_for_this_person_and_approved(browser, monkeypatch):
     monkeypatch.setenv("ALLOW_SUBMIT", "1")
+    monkeypatch.setenv("SUBMIT_USERS", "default")
+
+    class Approved:
+        def check(self, values, fields):
+            return None
+    browser.approval = Approved()
     for f in browser.read_form():
         browser.filled[f["name"]] = "x"
     assert "submitted" in browser.submit()

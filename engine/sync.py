@@ -1,8 +1,9 @@
-"""The hourly job: poll every board, normalize, upsert, close what vanished.
+"""One sweep by hand: every board once, then LinkedIn and Adzuna.
 
-Concurrent because board polls are not rate limited and are not sleep-bound.
-The semaphore is politeness, not throttling — every Greenhouse board shares one
-host.
+The boards are read exactly as the always-on engine reads them
+(engine/loop.py). LinkedIn and Adzuna stay out of search (they cannot be
+checked for still being open); they run here for the employer names that
+`cli.py discover` turns into new boards.
 """
 
 from __future__ import annotations
@@ -28,24 +29,6 @@ UA = "job-agent-mvp/0.1 (personal job search)"
 def load_boards(path: Path = BOARDS) -> list[dict]:
     boards = json.loads(path.read_text())
     return [b for b in boards if b.get("enabled", True)]
-
-
-def known_postings(conn, boards: list[dict]) -> dict[str, dict[str, str]]:
-    """Per SmartRecruiters company: posting id -> release date we stored.
-
-    Only that adapter pays a request per posting, so only it needs to know
-    what it already has. Read before the fetch, in one short query."""
-    names = [b["company"] for b in boards if b["source"] == "smartrecruiters"]
-    out: dict[str, dict[str, str]] = {n: {} for n in names}
-    if not names:
-        return out
-    marks = ", ".join("?" for _ in names)
-    for r in conn.execute(
-            f"SELECT company, source_id, posted_at FROM jobs "
-            f"WHERE source = 'smartrecruiters' AND closed_at IS NULL "
-            f"AND length(description) > 0 AND company IN ({marks})", names):
-        out[r[0]][r[1]] = r[2]
-    return out
 
 
 async def _poll(client: httpx.AsyncClient, sem: asyncio.Semaphore,
@@ -94,46 +77,30 @@ async def sync(boards: list[dict] | None = None, *, verbose: bool = True,
     the real apply link. Adzuna goes last for the same reason one step down:
     its copy is a snippet, so it only adds jobs nobody fuller has.
     """
-    boards = boards if boards is not None else load_boards()
-    sem = asyncio.Semaphore(CONCURRENCY)
-    limits = httpx.Limits(max_connections=20, max_keepalive_connections=20)
+    # The same read as the engine (engine/loop.py): India, last 30 days,
+    # closed on the second miss, a failed board closes nothing. With no list
+    # given, every enabled board in the table, not only the ones due.
+    from . import loop, registry
     conn = db.connect()
-    known = known_postings(conn, boards)
+    if boards is None:
+        registry.sync_json(conn)
+        boards = [dict(r) for r in conn.execute(
+            "SELECT * FROM boards WHERE enabled = 1 AND retired_at IS NULL")]
 
-    async with httpx.AsyncClient(timeout=TIMEOUT, limits=limits,
-                                 headers={"User-Agent": UA},
-                                 follow_redirects=True,
-                                 transport=transport) as client:
-        results = await asyncio.gather(
-            *(_poll(client, sem, b, known) for b in boards)
-        )
+    async with loop.client(transport) as client:
+        results = await loop.read_all(conn, client, boards, verbose=verbose)
 
     report = {"boards": len(boards), "ok": 0, "failed": 0,
-              "rows": 0, "closed": 0, "errors": []}
-
-    for board, rows in results:
-        if isinstance(rows, Exception):
-            # A failed board closes NOTHING. A timeout must never read as
-            # "that company closed every role."
+              "rows": 0, "closed": 0, "missed": 0, "errors": []}
+    for r in results:
+        if not r["ok"]:
             report["failed"] += 1
-            report["errors"].append(f"{board['company']}: {type(rows).__name__}")
-            if verbose:
-                print(f"  FAIL {board['company']:<22} {type(rows).__name__}")
+            report["errors"].append(f"{r['company']}: {r['error']}")
             continue
-
         report["ok"] += 1
-        # `unchanged` rows are postings we already hold in full: they count as
-        # seen (so they stay open) but are not rewritten with an empty body.
-        report["rows"] += db.upsert(conn, [r for r in rows
-                                           if not r.get("unchanged")])
-        if rows:
-            closed = db.close_missing(
-                conn, board["source"], board["company"],
-                [r["source_id"] for r in rows],
-            )
-            report["closed"] += closed
-        if verbose:
-            print(f"  ok   {board['company']:<22} {len(rows):>3} jobs")
+        report["rows"] += r["stored"]
+        report["closed"] += r["closed"]
+        report["missed"] += r["missed"]
 
     if with_linkedin:
         from . import linkedin

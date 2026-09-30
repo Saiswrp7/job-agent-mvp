@@ -23,6 +23,9 @@ MAX_ROWS = 40
 #: Rows reserved for recency regardless of keyword score, so a job that phrases
 #: everything unusually still gets seen.
 RECENCY_SLOTS = 5
+#: form (we fill it) → account (sign-up first) → anything else.
+KIND_ORDER = ("CASE apply_kind WHEN 'form' THEN 0 WHEN 'account' THEN 1 "
+              "ELSE 2 END")
 
 DEFAULTS = {
     "count": 5,
@@ -75,11 +78,20 @@ def normalize(filters: dict) -> dict:
     if not isinstance(out["country"], str) or not out["country"].strip():
         out["country"] = None
     out["owns_pnl"] = True if out["owns_pnl"] is True else None
+    # The table holds the last 30 days and nothing older, so "the last 60
+    # days" is the last 30, and is described that way.
+    days = out["posted_within_days"]
+    if not isinstance(days, int) or days < 1:
+        out["posted_within_days"] = None
+    elif days > db.DAYS:
+        out["posted_within_days"] = db.DAYS
     return out
 
 
 def _where(f: dict) -> tuple[list[str], list]:
-    clauses = ["closed_at IS NULL"]
+    # Open, listed by its employer in the last two days, posted in the last
+    # 30: the only jobs anyone is shown (engine/db.py VISIBLE).
+    clauses = [db.visible()]
     params: list = []
 
     if f["city"]:
@@ -190,15 +202,17 @@ def build(filters: dict, fit_years: int | None = None) -> tuple[str, list, dict]
     fit_sql, fit_params = _fit(fit_years)
     limit = min(f["count"] * OVERFETCH, MAX_ROWS)
 
+    # Forms we can fill come before sites that want an account first: the
+    # person is on a phone, and a form is the one apply the agent finishes.
     sql = f"""
         SELECT source, source_id, company, title, city, remote, location,
                url, apply_url, posted_at, seniority, years_min, years_max,
                company_type, stage, industry, description,
-               role_family, level, owns_pnl, country, work_mode,
+               role_family, level, owns_pnl, country, work_mode, apply_kind,
                {score_sql} AS hits, {fit_sql} AS fit
         FROM jobs
         WHERE {' AND '.join(clauses)}
-        ORDER BY fit DESC, hits DESC, posted_at DESC
+        ORDER BY fit DESC, {KIND_ORDER}, hits DESC, posted_at DESC
         LIMIT ?
     """
     return sql, [*score_params, *fit_params, *params, limit], f
@@ -260,9 +274,8 @@ def relax(f: dict, protect: frozenset[str] | set[str] = frozenset()
     # first" if skills ever move into the WHERE clause.
     if f.get("must_mention") and free("must_mention"):
         return {**f, "must_mention": None}, "ignored the skill keywords"
-    days = f.get("posted_within_days")
-    if days and days < 90 and free("posted_within_days"):
-        return {**f, "posted_within_days": 90}, "widened the posting window to 90 days"
+    # The posting window is never widened: nothing older than 30 days is kept,
+    # and a job that old is not what "latest" means to the person asking.
     if f.get("seniority") and free("seniority"):
         return {**f, "seniority": None}, "dropped the seniority filter"
     if f.get("industry") and free("industry"):

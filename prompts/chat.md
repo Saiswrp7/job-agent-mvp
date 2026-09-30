@@ -268,6 +268,11 @@ call per parked application. An answer you only acknowledged is an answer that
 never reached the form, and the application stays parked while they believe it
 is moving.
 
+A question starting "READY TO SUBMIT" lists the filled answers: show them all
+and ask them to reply "submit" or say what to change. Whatever they reply, pass
+it to `answer_application`. Only their own "submit" sends it; never say it was
+sent until an update says SUBMITTED.
+
 ## Presenting results
 
 Numbered, one line of reasoning each, link last. Be honest about stretches:

@@ -14,15 +14,17 @@ from __future__ import annotations
 
 import sqlite3
 
+from . import db
+
 #: The bar a search has to clear before beta users arrive.
 GATE = 15
-DAYS = 14
+#: The whole window the table keeps.
+DAYS = db.DAYS
 
 #: An employer link, on a job with a real description. 700 characters is well
 #: above any Adzuna snippet (they stop at 500) and below any real JD.
-USABLE = ("closed_at IS NULL AND source NOT IN ('adzuna', 'linkedin') "
-          "AND apply_url IS NOT NULL AND apply_url NOT LIKE '%adzuna.%' "
-          "AND apply_url NOT LIKE '%linkedin.com%' "
+USABLE = (f"{db.VISIBLE} "
+          "AND apply_url IS NOT NULL AND apply_kind IN ('form', 'account') "
           "AND length(description) >= 700 "
           "AND posted_at >= date('now', ?)")
 
@@ -75,13 +77,17 @@ def _role_sql(role: str) -> tuple[str, list]:
 
 
 def count(conn: sqlite3.Connection, role: str, place: str,
-          days: int = DAYS) -> int:
+          days: int = DAYS, kind: str | None = None) -> int:
+    """`kind`: 'form' (we fill it), 'account' (sign-up first), None (both)."""
     role_sql, params = _role_sql(role)
     sql = (f"SELECT COUNT(*) FROM jobs WHERE {USABLE} AND {role_sql} "
-           f"AND {PLACES[place]}")
-    return conn.execute(sql, [f"-{int(days)} days", *params]).fetchone()[0]
+           f"AND {PLACES[place]}" + (" AND apply_kind = ?" if kind else ""))
+    return conn.execute(sql, [f"-{int(days)} days", *params,
+                              *([kind] if kind else [])]).fetchone()[0]
 
 
-def report(conn: sqlite3.Connection, days: int = DAYS) -> list[tuple[str, str, int]]:
-    return [(role, place, count(conn, role, place, days))
+def report(conn: sqlite3.Connection, days: int = DAYS) -> list[tuple[str, str, int, int]]:
+    """(role, place, form jobs, account jobs) per realistic search."""
+    return [(role, place, count(conn, role, place, days, "form"),
+             count(conn, role, place, days, "account"))
             for role, places in SEARCHES for place in places]

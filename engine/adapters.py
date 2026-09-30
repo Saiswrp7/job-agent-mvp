@@ -11,9 +11,11 @@ import asyncio
 import hashlib
 import html
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
+
+from .db import DAYS as WINDOW_DAYS
 
 # Indian metro spellings that boards use interchangeably. Normalized on write so
 # queries stay pure SQL.
@@ -90,6 +92,58 @@ def norm_city(location: str | None) -> tuple[str | None, int]:
     return (head or None), remote
 
 
+INDIA_RE = re.compile(
+    r"\bindia\b|bengaluru|bangalore|mumbai|\bdelhi\b|gurgaon|gurugram|noida|"
+    r"hyderabad|\bpune\b|chennai|kolkata|ahmedabad|jaipur|kochi|chandigarh|"
+    r"coimbatore|indore|thiruvananthapuram|trivandrum|mysore|mysuru|vadodara|"
+    r"nagpur|lucknow|bhubaneswar|visakhapatnam|\bthane\b|navi mumbai|\bblr\b", re.I)
+#: Remote that says who may take it, when it says anyone.
+OPEN_REMOTE_RE = re.compile(r"anywhere|global|worldwide|\bapac\b|\basia\b", re.I)
+
+
+def in_scope(location: str | None, country_iso: str | None = None) -> bool:
+    """India first: a job in India, or remote and open to someone here.
+
+    "Remote" alone counts (it names nobody it excludes); "Remote - US" does
+    not. A board's feed lists every country; only these rows are kept.
+    """
+    if (country_iso or "").upper() == "IN":
+        return True
+    text = location or ""
+    if INDIA_RE.search(text):
+        return True
+    if REMOTE_RE.search(text):
+        rest = REMOTE_RE.sub("", text).strip(" -,/|()")
+        return not rest or bool(OPEN_REMOTE_RE.search(text))
+    return False
+
+
+#: What the apply button leads to, by ATS. `form`: an application form anyone
+#: can fill. `account`: sign up or sign in first (Workday, Oracle, SAP
+#: SuccessFactors...). The click test (research/engine) is what these rest on.
+FORM_ATS = frozenset({"greenhouse", "lever", "ashby", "workable", "smartrecruiters",
+                      "keka", "recruitee", "teamtailor", "breezy"})
+ACCOUNT_ATS = frozenset({"workday", "oracle", "successfactors", "phenom", "icims",
+                         "amazon", "taleo", "cornerstone", "ukg", "dayforce",
+                         "paycom", "jobvite"})
+#: An apply link on one of these is not the employer's own form.
+JOB_BOARD_RE = re.compile(
+    r"naukri\.|linkedin\.|indeed\.|foundit\.|monster\.|instahyre\.|iimjobs\.|"
+    r"hirist\.|glassdoor\.|adzuna\.|shine\.com|timesjobs\.", re.I)
+
+
+def kind_of(source: str, apply_url: str | None) -> str:
+    """form | account | link. `link` is never applied to by the agent."""
+    url = apply_url or ""
+    if not url.startswith("http") or JOB_BOARD_RE.search(url):
+        return "link"
+    if source in FORM_ATS:
+        return "form"
+    if source in ACCOUNT_ATS:
+        return "account"
+    return "link"
+
+
 def seniority_of(title: str) -> str | None:
     for pattern, label in SENIORITY_RE:
         if pattern.search(title):
@@ -119,8 +173,10 @@ def content_hash(company: str, title: str, location: str, body: str) -> str:
 
 def _row(*, source, source_id, company, title, location, description,
          url, apply_url=None, posted_at=None, updated_at=None,
-         department=None, employment_type=None, salary=None, meta=None) -> dict:
+         department=None, employment_type=None, salary=None, meta=None,
+         board=None, apply_kind=None) -> dict:
     city, remote = norm_city(location)
+    description = description or ""
     ymin, ymax = years_of(description)
     meta = meta or {}
     return {
@@ -147,6 +203,8 @@ def _row(*, source, source_id, company, title, location, description,
         "years_min": ymin,
         "years_max": ymax,
         "content_hash": content_hash(company, title, location or "", description),
+        "board": board,
+        "apply_kind": apply_kind or kind_of(source, apply_url or url),
     }
 
 
@@ -296,12 +354,19 @@ async def smartrecruiters(client: httpx.AsyncClient, slug: str, company: str,
         if offset >= int(page.get("totalFound") or 0) or not page.get("content"):
             break
 
+    # Postings released before the window are listed (they are still open, so
+    # they count as seen) but never read in full: nobody here is shown them.
+    cutoff = (datetime.now(UTC) - timedelta(days=WINDOW_DAYS)).strftime("%Y-%m-%d")
     out = []
     for p in listed:
         pid, released = str(p["id"]), p.get("releasedDate")
         if known.get(pid) and known[pid] == released:
             out.append({"source": "smartrecruiters", "source_id": pid,
                         "unchanged": True})
+            continue
+        if released and released[:10] < cutoff:
+            out.append({"source": "smartrecruiters", "source_id": pid,
+                        "old": True})
             continue
         await asyncio.sleep(SR_PAUSE)
         d = await client.get(f"{SR_API.format(slug=slug)}/{pid}")
