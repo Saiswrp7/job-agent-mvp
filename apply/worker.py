@@ -56,7 +56,10 @@ def _run(app_id: int, job: dict, work: Callable, connect: Callable) -> None:
         # person should hear, and marks it unreported.
         _set(conn, app_id, status, message or f"finished: {status}")
     except Exception as exc:                          # noqa: BLE001
-        _set(conn, app_id, "failed", f"stopped: {type(exc).__name__}: {exc}")
+        # A RuntimeError is ours and already says it in words; others keep
+        # their type, which is the useful part of an unexpected crash.
+        why = str(exc) if type(exc) is RuntimeError else f"{type(exc).__name__}: {exc}"
+        _set(conn, app_id, "failed", f"stopped: {why}")
     finally:
         conn.close()
         _threads.pop(app_id, None)
