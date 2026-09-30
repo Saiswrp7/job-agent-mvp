@@ -101,6 +101,11 @@ class Session:
             time.sleep(5 * (attempt + 1))
         if r.status_code == 429:
             raise RuntimeError("every cloud browser is busy; try again in a minute")
+        if r.status_code == 402:
+            # The plan's browser minutes are used up (each session bills at
+            # least a full minute). Said in words the person can act on.
+            raise RuntimeError("the cloud browser is out of minutes for this month, so "
+                               "nothing was filled or sent; apply on the job link yourself")
         r.raise_for_status()
         data = r.json()
         self.id, self.connect_url = data["id"], data["connectUrl"]
