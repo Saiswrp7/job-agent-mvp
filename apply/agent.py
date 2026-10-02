@@ -99,7 +99,13 @@ def start(app_id: int, job: dict, browser: BaseBrowser,
           conn: sqlite3.Connection | None = None) -> dict:
     close_after = conn is None
     conn = conn or db.connect()
+    r = None
     try:
+        # A new run needs its own yes: an approval left from an earlier run of
+        # this row (page 1 only, on Swiggy) must not carry over.
+        conn.execute("UPDATE applications SET confirm_values = NULL, confirmed_at = NULL, "
+                     "question = NULL WHERE id = ?", (app_id,))
+        conn.commit()
         _note_replay(conn, app_id, browser)
         browser.approval = confirm.Approval(conn, app_id, job)
         stop = _no_form_here(conn, app_id, job, browser)
@@ -114,9 +120,10 @@ def start(app_id: int, job: dict, browser: BaseBrowser,
             + (f": {pre['missing']}" if pre["missing"] else ".")
             + "\nIf anything is missing, ask for all of it in one question."
         )
-        return harness.run(app_id, browser, system, first_message=first, conn=conn)
+        r = harness.run(app_id, browser, system, first_message=first, conn=conn)
+        return r
     finally:
-        _close(browser)
+        _close(browser, conn, parked=r)
         if close_after:
             conn.close()
 
@@ -125,6 +132,7 @@ def resume_run(app_id: int, answer: str, browser: BaseBrowser,
                conn: sqlite3.Connection | None = None) -> dict:
     close_after = conn is None
     conn = conn or db.connect()
+    r = None
     try:
         row = conn.execute("SELECT * FROM applications WHERE id=?",
                            (app_id,)).fetchone()
@@ -134,19 +142,32 @@ def resume_run(app_id: int, answer: str, browser: BaseBrowser,
                "apply_url": row["apply_url"]}
         _note_replay(conn, app_id, browser)
         browser.approval = confirm.Approval(conn, app_id, job)
+        if getattr(browser, "resumed", False) and hasattr(browser, "fresh_form"):
+            try:
+                if not browser.page_state().get("fields"):
+                    browser.fresh_form()              # the kept page has no form
+            except Exception as exc:                  # noqa: BLE001
+                print(f"[apply] could not reload the form: {exc}")
         stop = _no_form_here(conn, app_id, job, browser)
         if stop:
             return stop
         pre = preflight(browser, conn)
         system = system_prompt(job, pre["known"], row["resume_path"])
-        # Every resume opens the form afresh, so what was typed before the
-        # question is gone. Said here, or the agent believes its history and
-        # meets it at the submit guard as "required fields still empty".
-        answer = (f"{answer}\n\n(The form was opened again to carry on, so it "
-                  f"is empty now: read_form and fill it again.)")
-        return harness.run(app_id, browser, system, answer=answer, conn=conn)
+        if getattr(browser, "resumed", False):
+            # The browser was kept open: same page, still filled.
+            answer = (f"{answer}\n\n(This is the same page you left, with everything "
+                      f"you filled still on it. Call read_form to check it, then carry "
+                      f"on from where you stopped. Do not fill it again.)")
+        else:
+            # Opened afresh, so what was typed before the question is gone.
+            # Said here, or the agent believes its history and meets it at
+            # the submit guard as "required fields still empty".
+            answer = (f"{answer}\n\n(The form was opened again to carry on, so it "
+                      f"is empty now: read_form and fill it again.)")
+        r = harness.run(app_id, browser, system, answer=answer, conn=conn)
+        return r
     finally:
-        _close(browser)
+        _close(browser, conn, parked=r)
         if close_after:
             conn.close()
 
@@ -188,15 +209,28 @@ def _note_replay(conn: sqlite3.Connection, app_id: int, browser: BaseBrowser) ->
         harness.trace(conn, app_id, -1, "browser", {"replay": url})
 
 
-def _close(browser: BaseBrowser) -> None:
-    """Close a cloud session when its run ends or parks: it is billed while
-    open, and a parked run can wait hours. Jev's tab stays — it is the person's
-    own Chrome, and they may want to look at the form."""
-    if getattr(browser, "close_after_run", False):
-        browser.close()
+def _close(browser: BaseBrowser, conn: sqlite3.Connection | None = None,
+           parked: dict | None = None) -> None:
+    """Close a cloud session when its run ends. A run that parked on a
+    question keeps its browser open for a while (cloud `keep`), so the answer
+    carries on on the same filled page instead of filling it all again: one
+    SmartRecruiters form took 3 sessions and 11 minutes that way (apply eval,
+    2026-10-01). Jev's tab stays: it is the person's own Chrome."""
+    if not getattr(browser, "close_after_run", False):
+        return
+    waiting = bool(parked and parked.get("status") == "waiting")
+    if waiting and conn is not None and hasattr(browser, "keep"):
+        try:
+            if browser.keep(conn):
+                return
+        except Exception as exc:                      # noqa: BLE001
+            print(f"[apply] could not keep the browser open: {exc}")
+    browser.close()
 
 
-def browser_for(job: dict, app_id: int, fixture: str | None = None) -> BaseBrowser:
+def browser_for(job: dict, app_id: int, fixture: str | None = None,
+                resume: bool = False) -> BaseBrowser:
+    """`resume`: carrying on a parked run, so a browser it kept open is used."""
     if fixture:
         return ManualBrowser(fixture, app_id)
     url = job.get("apply_url") or job.get("url")
@@ -204,7 +238,7 @@ def browser_for(job: dict, app_id: int, fixture: str | None = None) -> BaseBrows
         raise ValueError("job has no apply URL")
     if os.environ.get(BROWSER_ENV, "jev").lower() == "cloud":
         from apply.cloud import CloudBrowser  # noqa: PLC0415
-        return CloudBrowser(url, app_id)
+        return CloudBrowser(url, app_id, resume=resume)
     return JevBrowser(url, app_id)
 
 

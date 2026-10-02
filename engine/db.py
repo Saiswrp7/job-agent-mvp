@@ -311,6 +311,9 @@ MIGRATIONS: list[tuple[str, str, str]] = [
     # and when they said submit to exactly those.
     ("applications", "confirm_values", "TEXT"),
     ("applications", "confirmed_at", "TEXT"),
+    # A parked run's cloud browser, kept open so the answer carries on on the
+    # same filled page (apply/cloud.py keep): JSON id, connect_url, until, earlier.
+    ("applications", "kept_session", "TEXT"),
 ]
 
 #: Indexes that depend on a migrated column, so they cannot live in SCHEMA —

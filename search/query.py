@@ -196,8 +196,17 @@ def _fit(years: int | None) -> tuple[str, list]:
 
 
 def build(filters: dict, fit_years: int | None = None) -> tuple[str, list, dict]:
+    # Jobs this person was already shown ("source:source_id"). Sai saw CRED
+    # four times and Swiggy three across searches (2026-10-01): leaving them
+    # out of the query, not the reply, lets the next five be new ones.
+    exclude = [str(x) for x in ((filters or {}).get("exclude") or [])][:900]
     f = normalize(filters)
     clauses, params = _where(f)
+    if exclude:
+        clauses = [*clauses, "(source || ':' || source_id) NOT IN "
+                             f"({', '.join('?' for _ in exclude)})"]
+        params = [*params, *exclude]
+        f["exclude"] = exclude          # kept through every relax step
     score_sql, score_params = _score(f)
     fit_sql, fit_params = _fit(fit_years)
     limit = min(f["count"] * OVERFETCH, MAX_ROWS)

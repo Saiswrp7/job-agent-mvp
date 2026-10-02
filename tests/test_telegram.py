@@ -163,23 +163,29 @@ def _worker(tmp_path, bot, replies=None, news_rows=None):
 
 def test_start_text_and_reply(tmp_path):
     bot = FakeBot()
-    w, got = _worker(tmp_path, bot, replies={"pm jobs": "Here are 5."})
+    w, got = _worker(tmp_path, bot, replies={"/start": "Hi, Jojo here.",
+                                             "pm jobs": "Here are 5."})
     w.handle(_msg(7, "/start")["message"])
     w.handle(_msg(7, "pm jobs")["message"])
-    assert bot.sent[0] == (7, tg.WELCOME)
-    assert bot.sent[1] == (7, "Here are 5.") and got == ["pm jobs"]
+    # /start is answered by the model, not a canned welcome.
+    assert bot.sent[0] == (7, "Hi, Jojo here.")
+    assert bot.sent[1] == (7, "Here are 5.") and got == ["/start", "pm jobs"]
 
 
 def test_resume_pdf_is_taken_and_other_files_are_not(tmp_path):
     bot = FakeBot()
     bot.files["f1"] = b"%PDF-1.4 hello"
-    w, _ = _worker(tmp_path, bot)
+    w, got = _worker(tmp_path, bot)
     w.handle({"document": {"file_name": "Asha.pdf", "file_id": "f1"}})
     w.handle({"document": {"file_name": "Asha.docx", "file_id": "f2"}})
-    # A "reading your resume" line goes first: parsing takes 10-20 s.
-    assert "Reading your resume" in bot.sent[0][1]
-    assert bot.sent[1][1] == "Read Asha.pdf (14 bytes)"
-    assert "isn't a PDF" in bot.sent[2][1]
+    # No fixed text (Sai, 2026-10-01): the chat is told, and answers in its
+    # own words, carrying on with what they were doing.
+    assert got[0].startswith("(resume received: Asha.pdf. Read it:")
+    assert got[1].startswith("(they sent Asha.docx, which is not a PDF")
+    assert [t for _, t in bot.sent] == ["ok", "ok"]
+    # Nothing in the note reads as a resume choice they did not make.
+    import chat
+    assert chat.said_resume({"user_message": got[0]}, "tailored") == set()
 
 
 def test_a_crash_is_told_not_swallowed(tmp_path):
@@ -199,3 +205,12 @@ def test_push_sends_the_screenshot_when_there_is_one(tmp_path):
     w.push()                                           # nothing twice
     assert bot.photos == [(7, "app_3.png", "Update — Acme: filled")]
     assert bot.sent == [(7, "Update — Beta: filled")]
+
+
+def test_a_budget_is_read_per_person_from_the_settings(monkeypatch):
+    """Sai, 2026-10-01: "add 1 dollar budget to him". USER_BUDGETS holds
+    id:usd pairs; anyone not listed has no cap."""
+    monkeypatch.setenv("USER_BUDGETS", "1000000002:1, 123:2.5")
+    assert tg.budget_for(1000000002) == 1.0
+    assert tg.budget_for(123) == 2.5
+    assert tg.budget_for(1000000001) is None

@@ -183,6 +183,11 @@ def _skills(m: dict) -> str:
 def _name_block(master: dict, spec: dict) -> str:
     name = tex_escape(master.get("name", ""))
     contact = _contact(master)
+    if master.get("headline"):
+        # One line under the name, above the contact line: "Growth Manager |
+        # CRM & Revenue". Plain text, so an ATS reads it as words.
+        contact = (r"\normalsize " + tex_escape(master["headline"])
+                   + r"}\\[2pt]{\small " + contact)
     style = spec["name"]
     if style == "center_smallcaps":
         # Small caps read the letters' case, so the name goes in as written in
@@ -208,9 +213,11 @@ def _body(master: dict, spec: dict) -> str:
         "achievements": lambda: _items(master.get("achievements")),
         "certifications": lambda: _items(master.get("certifications")),
     }
-    titles = {**L.TITLES, **spec.get("titles", {})}
+    # Their own order and headings, when they set them (resume/structure.py),
+    # win over the layout's.
+    titles = {**L.TITLES, **spec.get("titles", {}), **(master.get("_titles") or {})}
     out = []
-    for key in spec.get("sections") or L.STANDARD_ORDER:
+    for key in master.get("_order") or spec.get("sections") or L.STANDARD_ORDER:
         content = build[key]()
         if content and content.strip():
             # No \vspace between a heading and its content: a vertical space is a

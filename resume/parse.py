@@ -29,7 +29,7 @@ SYSTEM = """Extract this resume into JSON. Return ONLY JSON, this shape:
   "summary": "...",
   "experience": [
     {"company": "...", "title": "...", "dates": "Jan 2023 - Present",
-     "bullets": ["...", "..."]}
+     "location": "...", "bullets": ["...", "..."]}
   ],
   "education": [{"school": "...", "degree": "...", "dates": "...", "score": "..."}],
   "skills": {"Category": ["skill", "skill"]},
@@ -50,6 +50,11 @@ Rules:
 - A section the resume does not have is an empty list.
 - Experience in reverse chronological order, most recent first.
 - Keep every bullet. Selection happens later, per job.
+- A role's city or place ("Bengaluru", "Remote") goes in that role's
+  `location`, never in `bullets`.
+- A short sub-heading inside a role that groups bullets ("Revenue &
+  Monetization", "Collaboration") is not a bullet: leave it out and keep the
+  bullets under it.
 - One consistent date format throughout.
 - If a field is genuinely absent, use null. Never invent one.
 - `linkedin`, `github`, `x` (Twitter/X) and `website` (portfolio or personal
@@ -146,6 +151,41 @@ def _fix_links(master: dict, links: list[str]) -> dict:
     return master
 
 
+#: A bullet that is only a place. Sai's resume came back with "Bengaluru" as
+#: the first bullet of every job, and every built resume printed it as a point
+#: (Telegram eval, 2026-10-01).
+_PLACE = re.compile(r"^(remote|hybrid|on-?site|india|bengaluru|bangalore|mumbai|"
+                    r"delhi|new delhi|ncr|noida|gurgaon|gurugram|pune|hyderabad|"
+                    r"chennai|kolkata|ahmedabad|jaipur|kochi|chandigarh|indore|"
+                    r"[a-z .]+,\s*(india|[a-z]{2,}))$", re.I)
+
+
+def _is_label(text: str) -> bool:
+    """A sub-heading parsed as a bullet: a few words, no number, no full stop,
+    no verb-led sentence. "Revenue & Monetization", "Collaboration"."""
+    t = text.strip()
+    words = t.split()
+    return (0 < len(words) <= 4 and not re.search(r"\d", t) and not t.endswith(".")
+            and all(w[:1].isupper() or w in ("&", "and", "of", "for", "/") for w in words))
+
+
+def tidy(master: dict) -> dict:
+    """Takes places and sub-headings out of experience bullets. Run on every
+    read, so a resume parsed before this rule existed is fixed too."""
+    for e in master.get("experience") or []:
+        keep = []
+        for b in e.get("bullets") or []:
+            text = b if isinstance(b, str) else str(b)
+            if _PLACE.match(text.strip()):
+                e.setdefault("location", text.strip())
+                continue
+            if _is_label(text):
+                continue
+            keep.append(b)
+        e["bullets"] = keep
+    return master
+
+
 def parse(pdf: Path, out: Path = MASTER) -> dict:
     text = pdf_text(pdf)
     # Hyperlinks first, then addresses typed out as text: a resume that
@@ -159,7 +199,7 @@ def parse(pdf: Path, out: Path = MASTER) -> dict:
     import usage
     with usage.purpose("read_resume"):
         master = llm.complete_json(SYSTEM, text, max_tokens=8192, timeout=60)
-    master = _fix_links(master, links)
+    master = tidy(_fix_links(master, links))
     out.write_text(json.dumps(master, indent=2, ensure_ascii=False))
     return master
 
@@ -187,8 +227,24 @@ def vault_rows(master: dict) -> dict:
     if jobs:
         rows["current_company"] = jobs[0].get("company")
         rows["current_title"] = jobs[0].get("title")
+    # Years of experience as the resume states it ("4+ years" in the summary
+    # or header). Swiggy's form asked Sai for it although his resume said
+    # so in its first line (2026-10-01). A number, since forms want one.
+    yrs = re.search(r"(\d{1,2})\s*\+?\s*(?:years|yrs)\b",
+                    f"{master.get('summary') or ''} {master.get('headline') or ''}", re.I)
+    if yrs:
+        rows["years_experience"] = yrs.group(1)
     if rows.get("full_name"):
+        # Written the way a form shows it: "BUGATA SAI SWAROOP" is "Bugata
+        # Sai Swaroop". Split into first and last only when there is nothing
+        # to guess: with three words, which is the surname depends on the
+        # person (surname first is common in India), so it is asked once
+        # (vault._guessed_name; Loop, 2026-10-01).
+        if rows["full_name"].isupper():
+            rows["full_name"] = rows["full_name"].title()
         parts = rows["full_name"].split()
-        rows["first_name"] = parts[0]
-        rows["last_name"] = parts[-1] if len(parts) > 1 else None
+        if len(parts) == 2:
+            rows["first_name"], rows["last_name"] = parts
+        elif len(parts) == 1:
+            rows["first_name"] = parts[0]
     return {k: v for k, v in rows.items() if v}

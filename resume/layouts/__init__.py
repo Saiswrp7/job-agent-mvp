@@ -120,13 +120,13 @@ LAYOUTS: dict[str, dict] = {
         "titles": {"experience": "Work Experience"},
     },
     "executive": {
-        "label": "Executive Two-Page",
-        "line": "Times-style serif at 11pt, wider margins, up to two pages. "
-                "12+ years, director and VP.",
+        "label": "Executive Classic",
+        "line": "Times-style serif, formal headings. 12+ years, director "
+                "and VP. One page, like every layout.",
         "for": "12+ years, director/VP",
         "font": "termes", "size": 11, "margin": "0.75in",
         "heading": "caps_rule", "name": "left", "accent": "000000",
-        "role": "bold_dates", "itemsep": "2pt", "max_pages": 2,
+        "role": "bold_dates", "itemsep": "2pt", "max_pages": 1,
         "titles": {"summary": "Professional Summary",
                    "experience": "Professional Experience"},
     },
@@ -179,7 +179,7 @@ _SAID = [
     ("tech_compact", r"tech|jake|compact|dense|latex|engineer(ing)? ?resume|swe|developer"),
     ("modern_accent", r"modern|colou?r|accent|blue|clean|sans|fresh|design"),
     ("indian_placement", r"indian|iim|placement|campus|fresher|education first|b-?school"),
-    ("executive", r"executive|two[- ]page|2[- ]page|senior|director|vp\b"),
+    ("executive", r"executive|senior|director|vp\b"),
     ("engineering_classic", r"core engineering|mechanical|electrical|civil|helvetica|arial"),
     ("charter", r"charter|default|original|current|same as before|professional"),
 ]
@@ -222,10 +222,6 @@ def suggest(role: str = "", years: int | None = None) -> list[str]:
 def fit_warning(key: str, years: int | None) -> str | None:
     """One sentence when a layout works against them, per the agreed rule:
     say it once with the reason, then build what they chose."""
-    spec = get(key)
-    if spec["max_pages"] == 2 and years is not None and years < 8:
-        return (f"{spec['label']} allows two pages, and at {years} years most "
-                "recruiters expect one; a second page reads as padding.")
     if key == "indian_placement" and years is not None and years >= 3:
         return ("Indian Placement puts education first and drops the summary; "
                 f"at {years} years your experience is the stronger opening.")

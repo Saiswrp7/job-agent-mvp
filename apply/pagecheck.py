@@ -62,10 +62,41 @@ def next_button(labels: list[str]) -> str | None:
     return next((t for t in labels if t and NEXT.search(t)), None)
 
 
+#: A page that says how many steps it has: its Continue is not the last one.
+STEPS = re.compile(r"\b(step|page)\s*\d+\s*(of|/)\s*\d+|\b\d+\s*/\s*\d+\s*steps?\b", re.I)
+
+
+def may_send(label: str, page_text: str) -> bool:
+    """A bare "Continue" or "Proceed" can be the button that sends: unlike
+    "Next" it does not promise another page. Without a step count on the
+    page it is treated as a send, so it goes through the approval first."""
+    return bool(re.match(r"^\s*(continue|proceed)\s*[›»→>]*\s*$", label or "", re.I)) \
+        and not STEPS.search(page_text or "")
+
+
 def entry_button(labels: list[str]) -> int | None:
     """Index of the job page's own "Apply" button, never an apply-with-X one."""
     return next((i for i, t in enumerate(labels)
                  if t and ENTRY.search(t) and not FOREIGN.search(t)), None)
+
+
+#: The site said no. Ashby: "We couldn't submit your application. Your
+#: application submission was flagged as possible spam." It was read as
+#: "unconfirmed, may have gone" (first real submit, metaforms, 2026-10-01).
+REFUSED = re.compile(r"couldn'?t submit|could not submit|unable to submit|"
+                     r"submission (was )?(failed|unsuccessful|rejected)|"
+                     r"flagged as (possible )?spam|application (was )?not submitted|"
+                     r"something went wrong", re.I)
+
+
+def refused(before_text: str, after_text: str) -> str:
+    """The new line on the page that says the submit was refused, or ""."""
+    old = set((before_text or "").splitlines())
+    for line in (after_text or "").splitlines():
+        line = line.strip()
+        if line and line not in old and REFUSED.search(line):
+            return line[:200]
+    return ""
 
 
 def confirmed(before_text: str, after_text: str, before_url: str, after_url: str) -> bool:
@@ -75,6 +106,20 @@ def confirmed(before_text: str, after_text: str, before_url: str, after_url: str
     new = len(CONFIRMED.findall(after_text or "")) > len(CONFIRMED.findall(before_text or ""))
     moved = after_url != before_url and bool(CONFIRMED_URL.search(after_url or ""))
     return new or moved
+
+
+def proof(before_text: str, after_text: str, before_url: str, after_url: str) -> str:
+    """What the page showed that counts as confirmation, in its own words: the
+    first new line with confirming words, else the thank-you address. Sent to
+    the person with the picture, so "sent" is something they can check."""
+    old = set((before_text or "").splitlines())
+    for line in (after_text or "").splitlines():
+        line = line.strip()
+        if line and line not in old and CONFIRMED.search(line):
+            return line[:160]
+    if after_url != before_url and CONFIRMED_URL.search(after_url or ""):
+        return f"the page moved to {after_url}"
+    return ""
 
 
 def complaints(text: str, limit: int = 3) -> list[str]:

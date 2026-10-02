@@ -100,7 +100,7 @@ def test_after_an_empty_search_the_agent_must_ask(monkeypatch, conn, tmp_path):
                           state, conn)
     second = chat.run_tool("search_jobs", {"query": "growth roles in Bengaluru"},
                            state, conn)
-    assert "ask one short question" in first
+    assert "offer one change as a question" in first
     assert second.startswith("ERROR: not searched")
 
 

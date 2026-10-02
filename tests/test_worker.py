@@ -118,7 +118,8 @@ def test_fixture_runs_stay_inline_for_the_scenario_harness(monkeypatch):
 def test_the_started_message_cannot_be_read_as_done():
     import chat
     msg = chat._started(7, {"title": "PM", "company": "CRED"}, tailoring=True)
-    assert "NOT SUBMITTED" in msg and "Do not say it is applied" in msg
+    assert "NOT SUBMITTED" in msg and "never say submitting, applied or done" in msg
+    assert "🚀" not in msg          # no sentence to copy word for word
 
 
 def test_finished_runs_are_written_into_the_reply_by_code(dbfile):
@@ -130,7 +131,7 @@ def test_finished_runs_are_written_into_the_reply_by_code(dbfile):
     c = db.connect(dbfile)
     news = worker.unreported(c)
     line = chat.news_lines(news)
-    assert line == "Update — PM at Co1: form filled, not submitted. All 8 fields filled."
+    assert line == "Update: PM at Co1. Form filled, not submitted. All 8 fields filled."
     assert "do not repeat" in chat.turn_state(c, [], news)
     assert worker.unreported(c) == []
 

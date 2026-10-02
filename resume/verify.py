@@ -152,8 +152,13 @@ def instruction_outcome(instruction: str, before: dict, after: dict,
     return out
 
 
+def _short(text: str, n: int = 60) -> str:
+    return text if len(text) <= n else text[:n].rsplit(" ", 1)[0] + "…"
+
+
 def apply_patch(master: dict, patch: dict,
-                supported: set[str] | None = None) -> tuple[dict, list[str]]:
+                supported: set[str] | None = None,
+                changes: list[str] | None = None) -> tuple[dict, list[str]]:
     """Returns (tailored_master, reverted_notes).
 
     `supported` comes from the career store — every number the person has
@@ -195,6 +200,10 @@ def apply_patch(master: dict, patch: dict,
                          f"AI-written: {', '.join(slop.added(original, text))})")
             text = original
         out["summary"] = slop.tidy(text) if text != original else text
+        if changes is not None and text != original:
+            why = (patch.get("summary_why") or "").strip()
+            changes.append("Summary rewritten for this job"
+                           + (f": {why}" if why else ""))
 
     by_index = {int(p["index"]): p for p in patch.get("experience", [])
                 if "index" in p}
@@ -206,7 +215,19 @@ def apply_patch(master: dict, patch: dict,
         if p:
             keep = p.get("keep")
             rewrites = {int(k): v for k, v in (p.get("rewrites") or {}).items()}
+            whys = {int(k): v for k, v in (p.get("why") or {}).items()
+                    if str(k).isdigit()}
             order = keep if isinstance(keep, list) and keep else range(len(bullets))
+            where = job.get("company", "?")
+            if changes is not None and isinstance(keep, list) and keep:
+                valid = [k for k in keep if 0 <= k < len(bullets)]
+                dropped = len(bullets) - len(set(valid))
+                if valid and valid[0] != 0:
+                    changes.append(f"{where}: moved \"{_short(bullets[valid[0]])}\" "
+                                   f"to the top")
+                if dropped > 0:
+                    changes.append(f"{where}: left out {dropped} line(s) this job "
+                                   f"does not ask about (still on your record)")
 
             chosen = []
             for idx in order:
@@ -230,6 +251,10 @@ def apply_patch(master: dict, patch: dict,
                         text = original
                     else:
                         text = slop.tidy(text)
+                        if changes is not None:
+                            why = (whys.get(idx) or "").strip()
+                            changes.append(f"{where}: reworded \"{_short(original)}\""
+                                           + (f", because {why}" if why else ""))
                 chosen.append(text)
             bullets = chosen or bullets
 

@@ -18,10 +18,11 @@ Three things in the loop are load-bearing and easy to get wrong:
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 
 import llm
-from apply import pagecheck
+from apply import confirm, pagecheck
 from apply.browser import BaseBrowser, Park, SubmitRefused
 from engine import db
 
@@ -141,6 +142,80 @@ def save(conn: sqlite3.Connection, app_id: int, history: list,
     conn.commit()
 
 
+def _their_answers(history: list) -> str:
+    """Everything the person typed in reply to this run's questions: the
+    tool_results that closed an `ask_user`. Only these, never the model's
+    own messages, so nothing it made up counts as said."""
+    asked = set()
+    for msg in history:
+        for b in msg.get("content") or [] if isinstance(msg.get("content"), list) else []:
+            if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == "ask_user":
+                asked.add(b.get("id"))
+    out = []
+    for msg in history:
+        for b in msg.get("content") or [] if isinstance(msg.get("content"), list) else []:
+            if (isinstance(b, dict) and b.get("type") == "tool_result"
+                    and b.get("tool_use_id") in asked):
+                out.append(str(b.get("content") or ""))
+    return "\n".join(out)
+
+
+_DATE_SAID = re.compile(
+    r"\b\d{1,2}(?:st|nd|rd|th)?[\s,/.-]+(?:[A-Za-z]{3,9}|\d{1,2})[\s,/.-]+\d{4}\b"
+    r"|\b\d{4}-\d{1,2}-\d{1,2}\b|\b[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}\b")
+
+
+def _same_date(value: str, said: str) -> str | None:
+    """The date `value` names, as YYYY-MM-DD, when the person wrote that same
+    day somewhere in their answers; else None."""
+    from apply.cloud import _parse_date             # noqa: PLC0415
+    want = _parse_date(value or "")
+    if want is None:
+        return None
+    for m in _DATE_SAID.finditer(said or ""):
+        text = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", m.group(0))
+        # "March 14, 1995" parses with its comma, "14 March, 1995" without.
+        for variant in (text, text.replace(",", " ")):
+            if _parse_date(re.sub(r"\s+", " ", variant).strip()) == want:
+                return want.isoformat()
+    return None
+
+
+def remember_answer(conn: sqlite3.Connection, history: list,
+                    args: dict) -> dict | None:
+    """A form value the person gave us, kept for the next form.
+
+    Sai's eval sheet row 27: "store important user information". Their
+    notice period went into QuillBot's form and was asked for again on the
+    next one, because answers only ever reached the form. Saved only when
+    the field maps to a vault key AND the value is in their own reply, so a
+    value the model derived or guessed is never stored as theirs."""
+    import vault
+    key = vault.match_key(args.get("name") or "")
+    value = (args.get("value") or "").strip()
+    if not key or not value or len(value) > 120:
+        return None
+    raw = _their_answers(history)
+    said = vault._norm(raw)
+    if not said:
+        return None
+    if vault._norm(value) not in said:
+        # A date is the same answer in another format: Sai typed "14 march
+        # 1995", the form took 1995-03-14, and it was never kept, so the next
+        # form would ask again (Loop, 2026-10-01).
+        value = _same_date(value, raw)
+        if not value:
+            return None
+    # A country is never a city: "India" for "where are you based" went in
+    # over "Bengaluru" and the next Swiggy form said City: India (2026-10-01).
+    if key == "location" and vault.is_country(value):
+        key = "country"
+    if vault.get(key, conn) == value:
+        return None
+    vault.put(key, value, source="user", conn=conn)
+    return {"key": key, "value": value}
+
+
 def load(conn: sqlite3.Connection, app_id: int) -> list | None:
     row = conn.execute("SELECT log FROM applications WHERE id=?",
                        (app_id,)).fetchone()
@@ -159,7 +234,10 @@ def run(app_id: int, browser: BaseBrowser, system: str,
     close_after = conn is None
     conn = conn or db.connect()
     try:
-        history = load(conn, app_id)
+        # A fresh start never carries the old run: Swiggy's retry (2026-09-30)
+        # reused a finished log ending in "Stop and say so", and the model
+        # stopped again without opening the form.
+        history = load(conn, app_id) if first_message is None else None
         if history is None:
             history = [{"role": "user", "content": first_message or "Begin."}]
         elif answer is not None:
@@ -187,9 +265,15 @@ def run(app_id: int, browser: BaseBrowser, system: str,
         # "done" reads as success to whatever displays it next. It reached a
         # person as "all five are submitted" when nothing had been.
         submitted = False
+        #: What the page said when it confirmed: the first line of the outcome,
+        #: so the "sent" update quotes the site, not the model.
+        proof = ""
         #: A click that changed the page without it saying "received". Kept
         #: apart from `blocked`: it may have been sent, so no retry.
         unconfirmed = False
+        #: Submit refused because sending is not switched on for this person
+        #: (SUBMIT_USERS): the outcome is written by code, see below.
+        sending_off = False
 
         for step in range(BUDGET):
             trace(conn, app_id, step, "prompt", {"messages": len(history)})
@@ -227,6 +311,8 @@ def run(app_id: int, browser: BaseBrowser, system: str,
                 # nothing; code has the last word on that.
                 if status == "blocked" and pagecheck.claims_sent(text):
                     text = pagecheck.NOT_SENT
+                if status == "submitted" and proof:
+                    text = f"{proof}\n\n{text}"
                 save(conn, app_id, history, status)
                 return {"status": status, "submitted": submitted,
                         "message": text.strip(), "steps": step}
@@ -247,9 +333,17 @@ def run(app_id: int, browser: BaseBrowser, system: str,
                 # Only a submit the page confirmed counts. A REFUSED comes back
                 # as is_error; an "ERROR: NOT SENT" comes back as plain text,
                 # and used to count as sent because it was not is_error.
+                if block.name == "fill_field" and not is_error:
+                    learned = remember_answer(conn, history, block.input)
+                    if learned:
+                        trace(conn, app_id, step, "learned", learned)
+                if block.name in ("submit", "next_page") and is_error \
+                        and confirm.SENDING_OFF in out:
+                    sending_off = True
                 if block.name in ("submit", "next_page") and not is_error:
                     if out.startswith("submitted"):
                         submitted = True
+                        proof = out.split("— ", 1)[-1].strip()
                     elif out.startswith("unconfirmed"):
                         unconfirmed = True
                 trace(conn, app_id, step, "tool_result", out[:2000])
@@ -258,6 +352,14 @@ def run(app_id: int, browser: BaseBrowser, system: str,
 
             # ALL results, one message.
             history.append({"role": "user", "content": results})
+            # Stopped by our own switch, not the site, and nothing on the page
+            # can change that, so the run ends here and code says why. Left to
+            # the model, two more steps told an invited user "the site refused
+            # the submission for this account" (AccorHotel, 2026-10-01).
+            if sending_off:
+                save(conn, app_id, history, "blocked")
+                return {"status": "blocked", "submitted": False,
+                        "message": confirm.SENDING_OFF_MESSAGE, "steps": step}
             save(conn, app_id, history, "running")
 
         save(conn, app_id, history, "failed")

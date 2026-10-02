@@ -143,7 +143,7 @@ class BaseBrowser:
         """
         return dict(self.filled)
 
-    def _guard_submit(self, fields: list[dict]) -> None:
+    def _guard_submit(self, fields: list[dict], partial: bool = False) -> None:
         values = self.current_values()
         missing = [f["label"] for f in fields
                    if f.get("required") and not values.get(f["name"])]
@@ -158,7 +158,12 @@ class BaseBrowser:
                                 "without the person saying submit")
         # Parks the run with the filled answers unless the person approved
         # exactly these. Raises Park, which the harness saves as `waiting`.
-        self.approval.check(values, fields)
+        # A look at the page (cloud browser) may have flagged things to check.
+        notes = getattr(self, "_warnings", None) or None
+        if notes:
+            self.approval.check(values, fields, partial=partial, notes=notes)
+        else:
+            self.approval.check(values, fields, partial=partial)
 
 
 class ManualBrowser(BaseBrowser):

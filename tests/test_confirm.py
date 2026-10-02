@@ -74,10 +74,10 @@ def test_a_form_that_changed_after_approval_asks_again(conn, armed):
 def test_nobody_submits_unless_named(conn, monkeypatch):
     monkeypatch.setenv("ALLOW_SUBMIT", "1")
     monkeypatch.setenv("SUBMIT_USERS", "1000000001")        # someone else
-    with pytest.raises(SubmitRefused, match="only for"):
+    with pytest.raises(SubmitRefused, match=confirm.SENDING_OFF):
         filled(conn).submit()
     monkeypatch.delenv("SUBMIT_USERS")
-    with pytest.raises(SubmitRefused, match="nobody"):
+    with pytest.raises(SubmitRefused, match="is empty"):
         filled(conn).submit()
 
 

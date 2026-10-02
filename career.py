@@ -225,8 +225,19 @@ def capture(message: str, conn: sqlite3.Connection | None = None) -> list[dict]:
     # A guess at a form fact, as "key: value". It used to be the whole message
     # (27 rows of "hi" and "why did you ask that?"), which left the nightly
     # pass nothing to promote and plenty to misread.
+    #
+    # Stated outright ("my notice is 30 days") goes straight in: the staging
+    # pass it waited for never runs on a schedule, so a notice period said in
+    # chat was asked for again by the next form (Sai's eval sheet row 27).
+    # Only a known key, only when their message holds the value word for word.
     for g in found.get("vault_guesses") or []:
-        if isinstance(g, dict) and g.get("key") and g.get("value"):
-            said = " (stated)" if g.get("stated") else " (inferred)"
-            vault.stage(f"{g['key']}: {g['value']}{said}", context=text, conn=conn)
+        if not (isinstance(g, dict) and g.get("key") and g.get("value")):
+            continue
+        key, value = str(g["key"]), str(g["value"]).strip()
+        if (g.get("stated") and key in vault.FIELDS and len(value) <= 120
+                and vault._norm(value) in vault._norm(text)):
+            vault.put(key, value, source="user", conn=conn)
+            continue
+        said = " (stated)" if g.get("stated") else " (inferred)"
+        vault.stage(f"{key}: {value}{said}", context=text, conn=conn)
     return out

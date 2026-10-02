@@ -52,19 +52,14 @@ CHUNK = 3500
 PUSH_EVERY = 5
 #: Said the moment slow work starts. Only the slow tools: a lookup is instant.
 PROGRESS = {
-    "search_jobs": "Searching jobs, about 20 seconds…",
-    "tailor_resume": "Tailoring your resume, about 30 seconds…",
-    "build_resume": "Building your resume…",
-    "send_resume": "Sending your resume…",
-    "start_application": "Starting the application…",
+    # Short on purpose (Sai, 2026-10-01: "just keep it searching").
+    "search_jobs": "Searching 🔍",
+    "tailor_resume": "Tailoring ✍️",
+    "build_resume": "Building ✍️",
 }
 
 PRIVATE = ("Hi! This is a private beta of a job-application assistant, open by "
            "invitation only. I've passed your request on.")
-WELCOME = ("Hi! I find jobs that fit you and fill in the applications.\n\n"
-           "Start by sending me your resume as a PDF file (📎 → File). Then tell me "
-           "what you're looking for, like \"product manager jobs in Bangalore\".\n\n"
-           "Nothing is ever submitted without you saying yes.")
 
 
 def env(key: str, path: Path = ENV_FILE) -> str:
@@ -101,6 +96,11 @@ def to_html(md: str) -> str:
     return t
 
 
+def plain(text: str) -> str:
+    """No em dashes in anything a person reads (Sai's rule)."""
+    return (text or "").replace(" — ", ", ").replace("—", "-")
+
+
 def chunks(text: str, size: int = CHUNK) -> list[str]:
     """Split on paragraph, then line, boundaries — never inside a word unless
     one line alone is too long."""
@@ -133,6 +133,9 @@ class Bot:
         return data["result"]
 
     def send(self, chat_id: int, text: str) -> None:
+        # Every message, not only chat replies: the application updates and
+        # canned texts went out with em dashes (eval sheet row 29).
+        text = plain(text)
         for part in chunks(text):
             try:
                 self.call("sendMessage", chat_id=chat_id, text=to_html(part),
@@ -152,7 +155,7 @@ class Bot:
         instead of vanishing: `send_document` used to drop the reply unread."""
         with open(path, "rb") as f:
             r = self.http.post(API.format(token=self.token, method=method),
-                               data={"chat_id": chat_id, "caption": caption[:1000]},
+                               data={"chat_id": chat_id, "caption": plain(caption)[:1000]},
                                files={field: (path.name, f)})
         try:
             data = r.json()
@@ -316,9 +319,9 @@ class Worker:
 
     def handle(self, msg: dict) -> None:
         try:
-            if (msg.get("text") or "").startswith("/start"):
-                self.bot.send(self.chat_id, WELCOME)
-            elif msg.get("document"):
+            # /start goes to the model like any hello: Sai wants the greeting
+            # written fresh each time, not one canned text.
+            if msg.get("document"):
                 self._document(msg["document"])
             elif msg.get("text"):
                 self._text(msg["text"])
@@ -332,18 +335,39 @@ class Worker:
                                         f"in a minute.")
 
     def _document(self, doc: dict) -> None:
+        """A resume, answered by the chat in its own words, which then carries
+        on with whatever they were doing. It used to get two fixed messages
+        ("Reading your resume, about 20 seconds", "Read it, 12 details saved")
+        and the application they had asked for was forgotten (Telegram eval,
+        2026-10-01). The words in brackets avoid anything that reads as a
+        resume choice ("uploaded", "file"): the choice is theirs to type."""
         name = doc.get("file_name") or "resume.pdf"
         if not name.lower().endswith(".pdf"):
-            self.bot.send(self.chat_id, f"{name} isn't a PDF. Please send your "
-                                        f"resume as a PDF file.")
+            self._text(f"(they sent {name}, which is not a PDF. Ask for their resume "
+                       f"as a PDF in one line.)")
             return
-        # Reading takes 10-20 s, and once took 7 minutes on a slow model
-        # reply. Silence that long reads as broken.
-        self.bot.send(self.chat_id, "Got it. Reading your resume, this takes "
-                                    "about 20 seconds.")
-        self.bot.typing(self.chat_id)
-        out = self.take_resume(name, self.bot.download(doc["file_id"]), self.conn)
-        self.bot.send(self.chat_id, out.get("reply") or out.get("error"))
+        done = threading.Event()
+
+        def keep_typing():                 # "typing…" while it is read, no text
+            while not done.is_set():
+                self.bot.typing(self.chat_id)
+                done.wait(4)
+
+        threading.Thread(target=keep_typing, daemon=True).start()
+        try:
+            out = self.take_resume(name, self.bot.download(doc["file_id"]), self.conn)
+        finally:
+            done.set()
+        f = out.get("facts") or {}
+        if not out.get("error"):
+            who = (f"{f['name']}, {f['roles']} roles at {f['companies']}; "
+                   if f else "")
+            self._text(f"(resume received: {name}. Read it: {who}their details are "
+                       f"saved for forms. Say so in a few words and carry on with what "
+                       f"they were doing before. Do not list what was saved.)")
+        else:
+            self._text(f"(resume received: {name}, but it could not be read: "
+                       f"{out.get('error')}. Ask for a PDF again in one line.)")
 
     def _text(self, text: str) -> None:
         # "typing…" for as long as the turn takes (15-40 s on GLM); Telegram
@@ -363,7 +387,11 @@ class Worker:
         files: list[str] = []
         if isinstance(answer, tuple):
             answer, files = answer
-        self.bot.send(self.chat_id, answer)
+        # One reply can be two messages: a background update first, or the
+        # greeting's second line (chat.SPLIT).
+        for part in [p.strip() for p in (answer or "").split("[[next]]")] or [""]:
+            if part:
+                self.bot.send(self.chat_id, part)
         if files:
             self.bot.send_files(self.chat_id, files)
 
@@ -372,6 +400,12 @@ class Worker:
         for row in self.unreported(self.conn):
             text = self.news([row])
             shot = self.shots / f"app_{row['id']}.png"
+            if row.get("status") == "submitted":
+                # Proof of a send is the page that confirmed it, taken at that
+                # moment. The last look at the form would show the form.
+                shot = self.shots / f"app_{row['id']}_sent.png"
+                if not shot.exists():
+                    text += "\n(No picture of the confirmation page was saved.)"
             # A photo caption holds 1,024 characters; an approval question
             # lists every answer, so it goes as its own message after the photo.
             long = len(text) > 900
@@ -382,6 +416,39 @@ class Worker:
                     self.bot.send(self.chat_id, text[:4000])
             else:
                 self.bot.send(self.chat_id, text[:4000])
+
+
+def budget_for(user_id: int) -> float | None:
+    """This person's AI spending cap in US dollars, from `USER_BUDGETS` in
+    .env ("1000000002:1,123:2.5"), read fresh each message so a top-up needs
+    no restart. None means no cap (Sai's own account has none)."""
+    for part in env("USER_BUDGETS").split(","):
+        who, _, usd = part.partition(":")
+        if who.strip() == str(user_id):
+            try:
+                return float(usd)
+            except ValueError:
+                return None
+    return None
+
+
+def spent_usd() -> float:
+    """What this profile's AI calls have cost, from the usage table (the same
+    numbers `cli.py cost` prints). AI only: cloud-browser minutes are on the
+    Browserbase plan and not counted here."""
+    import paths
+    import usage
+    try:
+        return round(sum(r["usd"] for r in usage.summary(paths.DB)), 4)
+    except Exception as exc:                          # noqa: BLE001
+        print(f"[telegram] spend unreadable ({exc}); treated as 0")
+        return 0.0                  # a brand-new profile has no file yet
+
+
+#: Said when someone's cap is used up. Sai, 2026-10-01: invited users get a
+#: small budget ("add 1 dollar budget to him").
+OVER_BUDGET = ("You've used up your trial credit for now, so I'm pausing here. "
+               "I've let Sai know; he can top it up.")
 
 
 def work(user_id: int) -> None:
@@ -412,15 +479,30 @@ def work(user_id: int) -> None:
             shown.add(name)
             me.bot.send(user_id, PROGRESS[name])
 
+    told_admin = False
+
     def reply(text: str) -> tuple[str, list[str]]:
-        nonlocal history
+        nonlocal history, told_admin
+        # A spending cap, checked before any AI runs for this message.
+        cap = budget_for(user_id)
+        if cap is not None:
+            spent = spent_usd()
+            if spent >= cap:
+                admin = env("TELEGRAM_ADMIN")
+                if not told_admin and admin.isdigit() and int(admin) != user_id:
+                    me.bot.send(int(admin), f"{user_id} reached their ${cap:g} budget "
+                                            f"(${spent:.2f} used). Raise USER_BUDGETS in "
+                                            f".env to let them carry on.")
+                    told_admin = True
+                print(f"[telegram {user_id}] over budget: ${spent:.2f} of ${cap:g}")
+                return OVER_BUDGET, []
         shown.clear()
         answer, history = chat.reply(text, history, state, conn, on_step=on_step)
         return answer, list(state.get("outbox") or [])
 
     me = Worker(user_id, Bot(env("TELEGRAM_BOT_TOKEN")), conn, reply,
-                web.take_resume, apply_worker.unreported, chat.news_lines,
-                paths.SHOTS)
+                web.take_resume, apply_worker.unreported,
+                lambda rows: chat.phrase_update(rows, conn), paths.SHOTS)
 
     inbox: queue.Queue = queue.Queue()
 

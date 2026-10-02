@@ -23,7 +23,8 @@ def load_master(path: Path = MASTER) -> dict:
         raise FileNotFoundError(
             f"{path} missing — run `python cli.py parse-resume <pdf>` first"
         )
-    return json.loads(path.read_text())
+    from resume.parse import tidy  # noqa: PLC0415
+    return tidy(json.loads(path.read_text()))
 
 
 def _slug(s: str) -> str:
@@ -92,12 +93,19 @@ def tailor(job: dict, master: dict | None = None,
     # reverts the person's own words, because "not in the original bullet" is
     # the definition of invented only while the PDF is the only source.
     import career
-    tailored, notes = verify.apply_patch(master, patch, career.supported(conn))
+    # What actually changed, written by code from what landed: a rewrite
+    # that was reverted is not a change, whatever the model meant. Sai's eval
+    # sheet row 33: "after building tell what you exactly did to align the
+    # resume and job description".
+    changes: list[str] = []
+    tailored, notes = verify.apply_patch(master, patch, career.supported(conn),
+                                         changes=changes)
     # A revert is only half the story. The other half is an instruction the
     # model quietly declined, which leaves nothing to revert and so said
     # nothing at all — see `instruction_outcome`.
     notes = notes + verify.instruction_outcome(instruction, master, tailored, notes)
-    return {"master": tailored, "patch": patch, "notes": notes}
+    return {"master": tailored, "patch": patch, "notes": notes,
+            "changes": changes}
 
 
 def build(job: dict, master: dict | None = None,
@@ -110,10 +118,10 @@ def build(job: dict, master: dict | None = None,
             f"_{_slug(job['company'])}_{_slug(job['title'])}.pdf")
     # Fitted to the page like the updated resume. It was rendered as-is, and
     # once Projects came through the reader a 4-year resume ran to two pages.
-    from resume import generate, layouts
+    from resume import generate
     from search.run import experience_years
     years = experience_years(conn)
-    limit = max(generate.page_limit(years), layouts.get(layout)["max_pages"])
+    limit = generate.page_limit()
     result["master"], result["pdf"], cut = generate.fit(
         result["master"], limit,
         lambda m, n: render.render(m, n, layout=layout), name,
@@ -136,6 +144,11 @@ def preview(result: dict) -> str:
             continue
         lines.append(f"{job.get('company')} — {job.get('title')}")
         lines += [f"  · {b}" for b in job["bullets"]]
+        lines.append("")
+    if result.get("changes") is not None:
+        lines.append("What I changed for this job — tell them, short:")
+        lines += [f"  + {c}" for c in result["changes"]] or [
+            "  + nothing: it already fit this job"]
         lines.append("")
     if result.get("notes"):
         # Covers both kinds now: a rewrite that was caught and reverted, and an

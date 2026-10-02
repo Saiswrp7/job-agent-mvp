@@ -127,6 +127,7 @@ PLAIN = {
     "tailor_resume":      "Built a resume tailored to that job",
     "build_resume":       "Built your updated resume",
     "send_resume":        "Sent the resume already on file",
+    "edit_resume_structure": "Changed your resume's sections or headline",
     "set_resume_preference": "Saved which resume to apply with",
     "start_application":  "Started filling in the application form",
     "answer_application": "Passed your answer to the parked application",

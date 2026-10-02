@@ -77,9 +77,11 @@ old preference; only when they say the old one no longer holds.
 ## vault_guesses: form facts
 
 Notice period, expected CTC, current CTC, years of experience, work
-authorisation. They are checked by a nightly pass before anything uses them,
-because they get typed into real applications. Add `"stated": true` when they
-said it about themselves outright.
+authorisation, location. Keys: `notice_period`, `expected_ctc`, `current_ctc`,
+`years_experience`, `work_authorization`, `location`. They get typed into real
+applications. Add `"stated": true` only when they said it about themselves
+outright, and put `value` in their exact words: a stated value is saved and
+reused on forms, anything else waits for a check.
 
 "My notice is 60 days"                     -> notice_period · 60 days · stated
 "I'd have to serve two months at Lenskart" -> notice_period · 2 months · stated: false

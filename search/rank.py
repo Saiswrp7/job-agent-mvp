@@ -71,7 +71,13 @@ def pick(rows: list[dict], filters: dict, message: str,
         f"{_render(rows)}"
     )
 
-    raw = llm.complete_json(system, user, model=llm.RANK_MODEL(), max_tokens=4096)
+    raw = _ask(system, user)
+    if _says_nothing(raw):
+        # 20 APM jobs matched and the ranker picked none and rejected none:
+        # "Nothing for APM roles today" (Telegram eval, 2026-10-01). The same
+        # search picked 5 on a replay. An answer with no picks and no rejects
+        # is a failed call, so ask once more.
+        raw = _ask(system, user)
 
     # A bare list is the old shape. Accept it rather than fail: a provider that
     # ignores the new schema should cost the person their reject list, never
@@ -81,6 +87,8 @@ def pick(rows: list[dict], filters: dict, message: str,
     elif isinstance(raw, dict):
         picks = raw.get("picks") or []
         dropped = raw.get("dropped") or []
+    elif raw is None:
+        picks, dropped = [], []
     else:
         raise ValueError(f"rank: expected an object, got {type(raw).__name__}")
 
@@ -102,7 +110,31 @@ def pick(rows: list[dict], filters: dict, message: str,
     # Never let a job appear as both picked and rejected.
     cut = [d for d in resolve(dropped, "why")
            if (d["source"], str(d["source_id"])) not in shown]
-    return chosen, cut
+    if not chosen and not cut:
+        # Still nothing, with jobs that matched every filter: show them in
+        # the table's order rather than tell the person there are none.
+        chosen = [{**r, "reason": ""} for r in rows[: filters["count"]]]
+    # One job once: the replay listed Clickpost's APM role twice.
+    seen, unique = set(), []
+    for r in chosen:
+        key = (r["source"], str(r["source_id"]))
+        if key not in seen:
+            seen.add(key)
+            unique.append(r)
+    return unique, cut
+
+
+def _ask(system: str, user: str):
+    try:
+        return llm.complete_json(system, user, model=llm.RANK_MODEL(), max_tokens=4096)
+    except ValueError:
+        return None                                # unreadable: treated as empty
+
+
+def _says_nothing(raw) -> bool:
+    if raw is None or raw == [] or raw == {}:
+        return True
+    return isinstance(raw, dict) and not raw.get("picks") and not raw.get("dropped")
 
 
 def ref(job: dict) -> str:

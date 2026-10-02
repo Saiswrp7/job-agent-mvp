@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 pw = pytest.importorskip("playwright.sync_api")
 
 import llm                                        # noqa: E402
-from apply import agent, harness, pagecheck, sites  # noqa: E402
+from apply import agent, cloud, harness, pagecheck, sites  # noqa: E402
 from apply.browser import BaseBrowser              # noqa: E402
 from apply.cloud import CloudBrowser               # noqa: E402
 from engine import db                              # noqa: E402
@@ -109,7 +109,7 @@ def _browser(page, html: str | None = None, url: str | None = None) -> CloudBrow
     else:
         page.set_content(html)
     b = CloudBrowser("about:blank", app_id=1, page=page)
-    b._guard_submit = lambda fields: None          # the guard has its own tests
+    b._guard_submit = lambda fields, partial=False: None   # the guard has its own tests
     return b
 
 
@@ -143,6 +143,18 @@ def test_never_presses_apply_with_indeed_and_names_the_next_page(page):
     assert page.evaluate("window.foreign") is None
 
 
+def test_no_approval_is_asked_before_the_last_page(page):
+    """Swiggy, 2026-09-30: approval was asked on page 1, and after the yes the
+    run stopped at Next. Now submit on a Next page asks nothing and points to
+    next_page."""
+    b = _browser(page, SHADOW)
+    asked = []
+    b._guard_submit = lambda fields: asked.append(fields)
+    b.read_form()
+    out = b.submit()
+    assert asked == [] and "next_page" in out and "Stop" not in out
+
+
 # --- Clickpost: the link was the job description ----------------------------------
 
 def test_open_form_presses_the_job_pages_own_apply_button(page):
@@ -172,11 +184,15 @@ def test_screenshot_says_what_the_page_shows(page, monkeypatch, tmp_path):
 
 # --- submit says "submitted" only when the page does ---------------------------------
 
-def test_submit_counts_only_a_confirmation(page):
+def test_submit_counts_only_a_confirmation(page, monkeypatch, tmp_path):
+    monkeypatch.setattr(cloud, "SHOTS", tmp_path)
     b = _browser(page, _form("document.body.innerHTML='<h1>Thank you for applying!</h1>'"))
     b.read_form()
     b.fill_field("Full name", "Asha")
-    assert b.submit().startswith("submitted — the page confirms it")
+    out = b.submit()
+    # Quoted in the site's own words, and pictured the moment it confirmed.
+    assert out.startswith('submitted — The page confirms it: "Thank you for applying!"')
+    assert (tmp_path / "app_1_sent.png").exists()
 
 
 def test_a_click_that_does_nothing_is_not_sent(page):
@@ -333,3 +349,235 @@ def test_untested_sites_get_the_link(monkeypatch, conn):
     assert not sites.can_fill("smartrecruiters") and sites.can_fill("keka")
     monkeypatch.delenv("APPLY_SITES")
     assert sites.can_fill("smartrecruiters")          # passed the cloud eval 30 Sep
+
+
+# --- the chat sees finished applications too ---------------------------------------
+
+def test_a_finished_unsent_application_is_visible_as_not_sent(conn):
+    """Sai, 2026-09-30: Swiggy ended blocked, the status list showed only open
+    ones and came back "(none)", and the bot said his submit "already went in"."""
+    import chat
+    conn.execute("UPDATE applications SET status = 'blocked'")
+    out = chat.run_tool("application_status", {}, {"picks": []}, conn)
+    assert "Swiggy" in out and "NOT SENT" in out and "(none)" not in out
+    assert "NOT SENT" in chat.turn_state(conn, [])
+    conn.execute("UPDATE applications SET status = 'submitted'")
+    assert "SENT, the site confirmed it" in chat.applications(conn)
+
+
+def test_a_fresh_start_does_not_carry_the_old_run(monkeypatch, conn):
+    """Swiggy retry, 2026-09-30: the row kept its finished log, the new run
+    loaded it, and the model repeated the old "Stop and say so"."""
+    import json
+    old = [{"role": "user", "content": "Fill this application."},
+           {"role": "assistant", "content": "Nothing was sent. Stop."}]
+    conn.execute("UPDATE applications SET status='blocked', log=?", (json.dumps(old),))
+    _script(monkeypatch, "Sent.")
+    harness.run(1, _OneSubmit("submitted — the page confirms it (x)"), "s",
+                first_message="Fill this application, fresh.", conn=conn)
+    log = json.loads(conn.execute("SELECT log FROM applications").fetchone()[0])
+    assert log[0]["content"] == "Fill this application, fresh."
+    assert "Stop." not in json.dumps(log)
+
+
+# --- Swiggy page 2: question boxes labelled only "*" (2026-10-01) ------------------
+
+def _sr_page2(with_definition: bool) -> str:
+    qs = [("aaaa1111-0000-0000-0000-000000000001", "How many years experience do you have?", "text"),
+          ("bbbb2222-0000-0000-0000-000000000002", "What is your current fixed salary?", "number"),
+          ("cccc3333-0000-0000-0000-000000000003", "What is your current notice period?", "text"),
+          ("dddd4444-0000-0000-0000-000000000004", "Are you willing to relocate?", "text")]
+    import json
+    definition = json.dumps({"id": "", "questions": [{"id": q, "label": t} for q, t, _ in qs]})
+    boxes = "".join(
+        f'<div data-test="question-container"><p class="q">{t}</p>'
+        f'<spl-input id="question_{q}" data-type="{ty}"></spl-input></div>' for q, t, ty in qs)
+    attr = f" definition='{definition}'" if with_definition else ""
+    return f"""<html><body><h2>Preliminary questions</h2>
+<sr-screening-questions-form{attr}>{boxes}</sr-screening-questions-form>
+<label><input type="checkbox" required> I have read the privacy notice</label>
+<button>Back</button><button>Submit</button>
+<script>
+customElements.define('spl-input', class extends HTMLElement {{
+  connectedCallback() {{
+    const r = this.attachShadow({{mode: 'open'}});
+    r.innerHTML = '<label for="i">*</label><input id="' + this.id + '" type="' + this.dataset.type + '"><span>0/200</span>';
+  }}
+}});
+</script></body></html>"""
+
+
+@pytest.mark.parametrize("with_definition", [True, False])
+def test_star_labelled_question_boxes_are_read_by_their_question(page, with_definition):
+    b = _browser(page, _sr_page2(with_definition))
+    names = [f["name"] for f in b.read_form()]
+    for q in ("How many years experience do you have?", "What is your current fixed salary?",
+              "What is your current notice period?", "Are you willing to relocate?"):
+        assert q in names, names
+    assert any(f["type"] == "checkbox" for f in b.read_form())
+    assert b.fill_field("What is your current fixed salary?", "1200000").startswith("filled")
+
+
+def test_a_box_with_no_label_anywhere_is_still_listed(page):
+    b = _browser(page, '<html><body><input id="question_zzzz9999-1"><button>Submit</button></body></html>')
+    assert [f["name"] for f in b.read_form()] == ["question_zzzz9999-1"]
+
+
+def test_the_approval_lists_boxes_left_blank():
+    from apply import confirm
+    fields = [{"name": "a", "label": "Expected salary"}, {"name": "b", "label": "Notice period"}]
+    q = confirm.question({"title": "PM", "company": "Co"},
+                         confirm.shown({"a": "18 LPA"}, fields),
+                         empty=confirm.blank({"a": "18 LPA", "b": ""}, fields))
+    assert "- Expected salary: 18 LPA" in q and "Left blank: Notice period." in q
+
+
+@pytest.mark.parametrize("said,typed", [("12 LPA", "1200000"), ("12.5 lakh", "1250000"),
+                                        ("1.2 Cr", "12000000"), ("1,200,000", "1200000"),
+                                        ("0", "0"), ("5 years", "5")])
+def test_a_number_box_gets_rupees_not_the_lakh_figure(said, typed):
+    """A rupee box given "12 LPA" must hold 1200000, never 12."""
+    assert cloud._number(said) == typed
+
+
+
+# --- research fixes, 2026-10-01 ------------------------------------------------------
+
+def test_relocate_is_matched_before_location():
+    import vault
+    assert vault.match_key("Are you willing to relocate if you are in a different location?") == "relocate"
+    assert vault.match_key("Current location") == "location"
+
+
+@pytest.mark.parametrize("label,text,risky", [
+    ("Continue", "Your details", True), ("Proceed", "", True),
+    ("Continue", "Step 1 of 3 Your details", False), ("Next", "", False),
+    ("Save and continue", "", False)])
+def test_a_bare_continue_without_steps_may_send(label, text, risky):
+    assert pagecheck.may_send(label, text) is risky
+
+
+def _continue_page(then: str) -> str:
+    return ("<html><body><label>Full name <input name='n' required></label>"
+            "<button type='button' onclick=\"" + then + "\">Continue</button></body></html>")
+
+
+def test_next_page_never_presses_a_continue_that_may_send(page):
+    b = _browser(page, _continue_page("document.body.innerHTML='<h1>Thank you for applying!</h1>'"))
+    b.read_form()
+    b.fill_field("Full name", "Asha")
+    out = b.next_page()
+    assert out.startswith("ERROR: NOT PRESSED") and "submit" in out
+    assert "Thank you" not in page.inner_text("body")
+
+
+def test_submit_presses_a_risky_continue_only_after_the_approval(page, monkeypatch, tmp_path):
+    monkeypatch.setattr(cloud, "SHOTS", tmp_path)
+    b = _browser(page, _continue_page("document.body.innerHTML='<h1>Thank you for applying!</h1>'"))
+    asked = []
+    b._guard_submit = lambda fields, partial=False: asked.append(partial)
+    b.read_form()
+    b.fill_field("Full name", "Asha")
+    out = b.submit()
+    assert asked == [True] and out.startswith("submitted")
+
+
+def test_a_risky_continue_that_opens_another_page_says_nothing_was_sent(page):
+    nxt = ("document.body.innerHTML=`<label>Notice period <input name=np></label>"
+           "<button>Submit</button>`")
+    b = _browser(page, _continue_page(nxt))
+    b.read_form()
+    b.fill_field("Full name", "Asha")
+    out = b.submit()
+    assert out.startswith("Nothing was sent: it opened another page") and "Notice period" in out
+
+
+def test_partial_approval_lets_the_first_page_through():
+    from apply import confirm
+    from apply.browser import Park
+    c = db.connect(":memory:")
+    c.execute("INSERT INTO applications (id, source, source_id, company, title) VALUES (1,'x','1','Co','PM')")
+    a = confirm.Approval(c, 1, {"title": "PM", "company": "Co"})
+    fields = [{"name": "a", "label": "Name"}, {"name": "b", "label": "Notice"}]
+    with pytest.raises(Park):
+        a.check({"a": "Asha", "b": "30 days"}, fields)
+    confirm.approve(c, 1)
+    a.check({"a": "Asha"}, fields, partial=True)          # page 1 again: agrees
+    with pytest.raises(Park):
+        a.check({"a": "Asha"}, fields)                    # but not as the final send
+    with pytest.raises(Park):
+        a.check({"a": "Ravi"}, fields, partial=True)      # changed: ask again
+
+
+def test_the_wait_runs_on_while_browserbase_solves_a_captcha(page):
+    b = _browser(page, "<html><body><p>Form</p></body></html>")
+    page.evaluate("""() => { console.log('browserbase-solving-started');
+        setTimeout(() => { console.log('browserbase-solving-finished');
+                           document.body.innerHTML = '<h1>Thank you for applying!</h1>'; }, 2500); }""")
+    st = b.page_state()
+    st["text"] = "Form"
+    assert b._after_submit(st, "Submit", wait_ms=1000).startswith("submitted")
+
+
+def test_a_dropdown_that_opens_on_click_shows_its_choices(page):
+    html = """<html><body><label for=d>Degree</label>
+<input id=d role=combobox aria-autocomplete=list>
+<ul id=menu style="display:none"><li role=option>Bachelors</li><li role=option>Masters</li></ul>
+<script>
+const d = document.getElementById('d'), m = document.getElementById('menu');
+d.addEventListener('click', () => { m.style.display = 'block'; });
+d.addEventListener('input', () => { m.style.display = 'none'; });
+d.addEventListener('blur', () => setTimeout(() => {
+  if (!['Bachelors', 'Masters'].includes(d.value)) d.value = ''; }, 50));
+m.querySelectorAll('li').forEach(li => li.addEventListener('click', () => { d.value = li.innerText; m.style.display = 'none'; }));
+</script></body></html>"""
+    b = _browser(page, html)
+    b.read_form()
+    out = b.fill_field("Degree", "B.Tech")
+    assert "Bachelors" in out and "Masters" in out, out
+
+
+# --- eval fixes, 2026-10-01 -----------------------------------------------------------
+
+def test_a_dash_never_decides_a_dropdown_match():
+    assert cloud._match(["Immediate", "1–2 weeks", "3–4 weeks"], "3-4 weeks") == "3–4 weeks"
+
+
+def test_a_dropdown_that_filters_to_nothing_is_opened_and_the_match_picked(page):
+    html = """<html><body><label for=d>Notice period</label>
+<input id=d role=combobox aria-autocomplete=list>
+<ul id=menu style="display:none"><li role=option>Immediate</li><li role=option>3–4 weeks</li></ul>
+<script>
+const d = document.getElementById('d'), m = document.getElementById('menu');
+d.addEventListener('click', () => { m.style.display = 'block'; });
+d.addEventListener('input', () => { m.style.display = 'none'; });
+d.addEventListener('blur', () => setTimeout(() => {
+  if (!['Immediate', '3–4 weeks'].includes(d.value)) d.value = ''; }, 50));
+m.querySelectorAll('li').forEach(li => li.addEventListener('mousedown', e => {
+  e.preventDefault(); d.value = li.innerText; m.style.display = 'none'; }));
+</script></body></html>"""
+    b = _browser(page, html)
+    b.read_form()
+    assert b.fill_field("Notice period", "3-4 weeks").startswith("filled"), b.current_values()
+    assert page.evaluate("document.getElementById('d').value") == "3–4 weeks"
+
+
+@pytest.mark.parametrize("url,cap", [
+    ("https://coditude.keka.com/careers/applyjob/1", ("#imgCaptcha", "#captcha")),
+    ("https://jobs.lever.co/x/1/apply", None), ("https://notkeka.com/x", None)])
+def test_keka_sessions_tell_browserbase_where_the_captcha_is(url, cap):
+    assert cloud.custom_captcha(url) == cap
+
+
+def test_the_check_before_submit_reads_the_page_as_it_is_now(page):
+    """Lever's signature Name/Date appeared after the agent's last read."""
+    b = _browser(page, "<html><body><label>Full name <input name=n required></label>"
+                       "<button>Submit</button></body></html>")
+    b.read_form()
+    b.fill_field("Full name", "Asha")
+    page.evaluate("""() => document.body.insertAdjacentHTML('afterbegin',
+        '<label>Signature date <input name=sd required></label>')""")
+    seen = []
+    b._guard_submit = lambda fields, partial=False: seen.append([f["name"] for f in fields])
+    b.submit()
+    assert "Signature date" in seen[0]

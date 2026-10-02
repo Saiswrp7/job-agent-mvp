@@ -336,7 +336,7 @@ def test_submit_works_when_armed_for_this_person_and_approved(browser, monkeypat
     monkeypatch.setenv("SUBMIT_USERS", "default")
 
     class Approved:
-        def check(self, values, fields):
+        def check(self, values, fields, partial=False):
             return None
     browser.approval = Approved()
     for f in browser.read_form():

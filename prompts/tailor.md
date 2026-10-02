@@ -5,11 +5,17 @@ Return ONLY JSON:
 ```json
 {
   "summary": "rewritten 2-line summary, or null to keep the original",
+  "summary_why": "which part of the JD the new summary answers",
   "experience": [
-    {"index": 0, "keep": [2, 0, 4], "rewrites": {"2": "reworded bullet"}}
+    {"index": 0, "keep": [2, 0, 4], "rewrites": {"2": "reworded bullet"},
+     "why": {"2": "the JD asks for A/B testing"}}
   ]
 }
 ```
+
+- `why` / `summary_why` — for each rewrite, the JD requirement it answers, in
+  under ten words. The person is shown these, so name the JD's ask, not a
+  general reason.
 
 - `index` — the position of the job in the resume, 0 is the most recent.
 - `keep` — which of that job's bullets to show, **in the order to show them**.

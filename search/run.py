@@ -250,7 +250,8 @@ def go_live(conn, target: tuple[str, str, bool]) -> tuple[list, str]:
 
 def search(message: str, *, profile: str = "", conn=None,
            said_verbatim: str | None = None, fit_years: int | None = None,
-           live: bool = False, said_recently: str | None = None) -> dict:
+           live: bool = False, said_recently: str | None = None,
+           exclude: list[str] | None = None) -> dict:
     """`live` allows one LinkedIn search while they wait, only when the table
     comes up short. Off by default so nothing reaches the network unasked —
     tests, evals and replays stay offline. `JOB_AGENT_LIVE=0` turns it off for
@@ -282,6 +283,8 @@ def search(message: str, *, profile: str = "", conn=None,
     # behind. This is the only moment the distinction exists.
     said = query.stated(f)
 
+    if exclude:
+        f["exclude"] = list(exclude)    # shown before: see chat search_jobs
     rows, f = query.search(f, conn, fit_years)
 
     # Sparse results relax in a fixed, logged order — never by asking a second
@@ -385,8 +388,21 @@ def search(message: str, *, profile: str = "", conn=None,
             f"SELECT COUNT(*) FROM jobs WHERE {db.visible()}").fetchone()
         open_jobs = row[0] if row else 0
 
+    # Nothing new, but there were matches they have already seen: that is a
+    # different answer from "nothing out there", and they get to choose.
+    # Only when the seen list is what emptied it: no rows left after it, and
+    # rows there without it. Rows left but none picked is "nothing good", not
+    # "all seen": an invited user had seen 1 job and was told "all 20 are already in your
+    # results" (2026-10-01).
+    all_seen = 0
+    if not picks and not rows and exclude and conn is not None:
+        again, _ = query.search({**f, "exclude": []}, conn, fit_years)
+        seen = set(exclude)
+        all_seen = sum(1 for r in again if f"{r.get('source')}:{r.get('source_id')}" in seen)
+
     return {
         "picks": picks,
+        "all_seen": all_seen,
         "dropped": dropped,
         "filters": f,
         "notes": notes,

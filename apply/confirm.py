@@ -38,6 +38,17 @@ def me() -> str:
     return "default" if paths.IS_DEFAULT else paths.HOME.name.removeprefix("tg-")
 
 
+#: In the refusal when sending is off for this person. The harness looks for it
+#: and writes the outcome itself (see SENDING_OFF_MESSAGE).
+SENDING_OFF = "SENDING IS OFF FOR THIS ACCOUNT"
+#: What the person is told, decided by code: the model once turned this refusal
+#: into "the site blocked it... retrying" (an invited user, AccorHotel, 2026-10-01).
+#: One sentence: the update quotes only an outcome's first sentence.
+SENDING_OFF_MESSAGE = ("Filled but not sent: sending isn't switched on for your account "
+                       "yet (a beta setting on our side, not the site), so nothing goes "
+                       "out until Sai turns it on.")
+
+
 def not_allowed() -> str | None:
     """None when this profile may submit, else why not."""
     if os.environ.get(SUBMIT_ENV) != "1":
@@ -45,8 +56,9 @@ def not_allowed() -> str | None:
                 f"application. Everything up to this point ran.")
     allowed = {x.strip() for x in os.environ.get(USERS_ENV, "").split(",") if x.strip()}
     if me() not in allowed:
-        return (f"submitting is switched on only for {sorted(allowed) or 'nobody'}, "
-                f"not this person — the form is filled, nothing was sent.")
+        return (f"{SENDING_OFF} (SUBMIT_USERS is {sorted(allowed) or 'empty'}): our own "
+                f"setting, not the site. The form is filled, nothing was sent. Stop "
+                f"here and say exactly that; do not retry.")
     return None
 
 
@@ -60,20 +72,67 @@ def said_submit(message: str | None) -> bool:
 def shown(values: dict, fields: list[dict]) -> dict[str, str]:
     """The answers as the person would read them: by label, filled ones only."""
     labels = {f["name"]: (f.get("label") or f["name"]) for f in fields}
-    out = {}
+    out, files = {}, set()
     for name, value in values.items():
         if value in (None, "", []):
             continue
-        out[labels.get(name, name)] = str(value)
+        v = str(value)
+        # One resume in two upload boxes is one answer: Keka's second box
+        # came back named after the page heading and the person saw their
+        # resume twice, once as "Apply for this job" (Loop, 2026-10-01).
+        if re.search(r"\.(pdf|docx?|rtf|odt|txt)$", v, re.I):
+            if v.lower() in files:
+                continue
+            files.add(v.lower())
+        out[labels.get(name, name)] = v
     return out
 
 
-def question(job: dict, answers: dict[str, str], changed: list[str] | None = None) -> str:
+def blank(values: dict, fields: list[dict]) -> list[str]:
+    """Boxes on this page still empty. Shown with the answers: Swiggy's page 2
+    was approved with salary, notice and relocation silently empty."""
+    return [f.get("label") or f["name"] for f in fields
+            if values.get(f["name"]) in (None, "", [])]
+
+
+def _plain(value: str) -> str:
+    """An answer as it is compared, not as it is shown: case and spacing
+    ignored, and a phone-like answer by its last 10 digits. "+91-9876543210"
+    and "9876543210" are the same answer; re-asking for approval over that
+    (Loop, 2026-10-01) taught nothing and cost a round trip."""
+    v = re.sub(r"\s+", " ", str(value or "")).strip().lower()
+    digits = re.sub(r"\D", "", v)
+    if len(digits) >= 10 and re.fullmatch(r"[\d\s+()\-.]+", v):
+        return digits[-10:]
+    return v
+
+
+def same(before: dict | None, now: dict) -> bool:
+    if before is None or set(before) != set(now):
+        return False
+    return all(_plain(before[k]) == _plain(now[k]) for k in now)
+
+
+def question(job: dict, answers: dict[str, str], changed: list[str] | None = None,
+             empty: list[str] | None = None, notes: list[str] | None = None) -> str:
     lines = [f"{READY}: {job.get('title')} at {job.get('company')}."]
     if changed:
         lines.append("These changed since you said submit: " + ", ".join(changed) + ".")
     lines.append("It is filled like this:")
-    lines += [f"- {k}: {v[:120]}" for k, v in answers.items()]
+    # Long answers in full: each was cut at 120 characters, and Sai read his
+    # "why this company" answer as incomplete although all of it was sent
+    # (Swiggy, 2026-10-01). Only a card past Telegram's 4,096-character limit
+    # is shortened, longest answers first.
+    budget = 3400 - sum(len(k) + 4 for k in answers)
+    cap = 1200
+    while cap > 150 and sum(min(len(v), cap) for v in answers.values()) > budget:
+        cap -= 50
+    lines += [f"- {k}: {v if len(v) <= cap else v[:cap].rstrip() + '…'}" for k, v in answers.items()]
+    if empty:
+        lines.append("Left blank: " + "; ".join(e[:80] for e in empty) + ".")
+    if notes:
+        lines.append("Check these (a look at the page flagged them): "
+                     + "; ".join(n[:120] for n in notes) + ".")
     lines.append("Reply 'submit' to send it, or tell me what to change.")
     return "\n".join(lines)
 
@@ -84,25 +143,35 @@ class Approval:
     def __init__(self, conn: sqlite3.Connection, app_id: int, job: dict):
         self.conn, self.app_id, self.job = conn, app_id, job
 
-    def check(self, values: dict, fields: list[dict]) -> None:
+    def check(self, values: dict, fields: list[dict], partial: bool = False,
+              notes: list[str] | None = None) -> None:
         """Returns when the person approved exactly these answers. Otherwise
-        stores them as the ones to approve and parks with the question."""
+        stores them as the ones to approve and parks with the question.
+
+        `partial`: a button that may send but may also open another page (a
+        bare Continue). The answers so far need only agree with what they
+        approved, or a refilled first page could never get past it.
+        `notes`: what a look at the page flagged, shown with the answers."""
         from apply.browser import Park
         now = shown(values, fields)
         row = self.conn.execute(
             "SELECT confirm_values, confirmed_at FROM applications WHERE id = ?",
             (self.app_id,)).fetchone()
         before = json.loads(row["confirm_values"]) if row and row["confirm_values"] else None
-        if row and row["confirmed_at"] and before == now:
+        if row and row["confirmed_at"] and same(before, now):
+            return
+        if partial and row and row["confirmed_at"] and before is not None \
+                and all(_plain(before.get(k)) == _plain(v) for k, v in now.items()):
             return
         changed = None
         if row and row["confirmed_at"] and before is not None:
-            changed = sorted(k for k in set(before) | set(now) if before.get(k) != now.get(k))
+            changed = sorted(k for k in set(before) | set(now)
+                             if _plain(before.get(k)) != _plain(now.get(k)))
         self.conn.execute(
             "UPDATE applications SET confirm_values = ?, confirmed_at = NULL WHERE id = ?",
             (json.dumps(now), self.app_id))
         self.conn.commit()
-        raise Park(question(self.job, now, changed))
+        raise Park(question(self.job, now, changed, blank(values, fields), notes))
 
 
 def approve(conn: sqlite3.Connection, app_id: int) -> None:

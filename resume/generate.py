@@ -75,7 +75,9 @@ def from_career(master: dict | None = None,
     if skills:
         out["skills"] = skills
 
-    return out, unplaced
+    # Their section order, headings and headline, if they set any.
+    from resume import structure
+    return structure.apply(out, conn), unplaced
 
 
 def _skill_list(skills) -> list[str]:
@@ -102,10 +104,11 @@ def additions(master: dict | None = None,
                                - len(_skill_list(master.get("skills"))))
 
 
-def page_limit(years: int | None) -> int:
-    """RESUME_PLAN §7: one page under 8 years, two after. Unknown years get one
-    page, because a second page nobody needed costs more than a line cut."""
-    return 2 if years is not None and years >= 8 else 1
+def page_limit(years: int | None = None) -> int:
+    """Always one page (Sai, eval sheet row 39: "resume should be one page,
+    compact, align accordingly"). It was two from 8 years (RESUME_PLAN §7);
+    `years` stays so callers need not change."""
+    return 1
 
 
 def pages(pdf: Path) -> int:
@@ -175,11 +178,7 @@ def build(master: dict | None = None, conn: sqlite3.Connection | None = None,
     name = out_name or f"{tailor._slug(built.get('name', 'resume'))}.pdf"
     from search.run import experience_years
     from resume import layouts
-    # A two-page layout they chose is two pages even under 8 years: they were
-    # told once why most recruiters expect one (layouts.fit_warning), and the
-    # choice is theirs. A one-page layout keeps the years rule.
-    limit = max(page_limit(experience_years(conn)),
-                layouts.get(layout)["max_pages"])
+    limit = page_limit()
     years = experience_years(conn)
     built, pdf, cut = fit(built, limit,
                           lambda m, n: render.render(m, n, layout=layout), name,

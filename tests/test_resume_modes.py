@@ -101,7 +101,7 @@ def test_an_apply_with_no_choice_asks_and_sends_nothing(world):
     state = say("apply to 1")
     out = apply(conn, state)
     assert out.startswith("ERROR: not started")
-    assert "your file" in out and "updated" in out and "tailored" in out
+    assert "yours" in out and "updated" in out and "tailored" in out
     assert started(conn) == 0 and sent == [] and built == []
     assert state["resume_asked_turn"] == 2
 
@@ -172,15 +172,15 @@ def test_the_question_offers_last_time_in_their_words(world):
     conn, say, _, _, _ = world
     vault.put("resume_mode", "existing", source="user", conn=conn)
     out = apply(conn, say("apply to 1"))
-    assert "(Last time: your file.)" in out
-    assert "Offer `your file` as the default" in chat.resume_status(conn)
+    assert "(last time: yours)" in out
+    assert "Offer `yours` as the default" in chat.resume_status(conn)
 
 
 def test_a_default_saved_as_master_reads_as_updated(world):
     """`master` was the old name for the updated resume."""
     conn, say, _, _, _ = world
     vault.put("resume_mode", "master", source="user", conn=conn)
-    assert "(Last time: updated.)" in apply(conn, say("apply to 1"))
+    assert "(last time: updated)" in apply(conn, say("apply to 1"))
 
 
 # --- nothing new since the upload: two choices, not three ----------------
@@ -190,7 +190,7 @@ def test_nothing_new_means_the_question_has_two_choices(world, monkeypatch):
     from resume import generate
     monkeypatch.setattr(generate, "additions", lambda master=None, conn=None: 0)
     out = apply(conn, say("apply to 1"))
-    assert "your file" in out and "tailored" in out and "updated" not in out
+    assert "yours" in out and "tailored" in out and "updated" not in out
     assert "updated" not in chat.resume_status(conn).split("Offer")[0]
 
 
@@ -200,7 +200,7 @@ def test_updated_with_nothing_new_sends_their_file(world, monkeypatch):
     from resume import generate
     monkeypatch.setattr(generate, "additions", lambda master=None, conn=None: 0)
     out = apply(conn, say("updated one please"), resume="updated")
-    assert "Resume: your file (nothing new since your upload" in out
+    assert "Resume: yours (nothing new since your upload" in out
     assert built == [] and sent == [str(tmp_path / "upload.pdf")]
 
 
@@ -324,11 +324,12 @@ def test_updated_cuts_the_weakest_line_until_it_fits(tmp_path):
                                                   "Owned roadmap"]   # record untouched
 
 
-def test_page_limit_by_years():
+def test_every_resume_is_one_page():
+    """Sai's eval sheet row 39: always one page, at any length of career."""
     from resume import generate
     assert generate.page_limit(None) == 1
     assert generate.page_limit(5) == 1
-    assert generate.page_limit(8) == 2
+    assert generate.page_limit(14) == 1
 
 
 # --- the file name the company sees -------------------------------------

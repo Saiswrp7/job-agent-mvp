@@ -127,9 +127,13 @@ def test_suggestions_follow_role_and_years():
 
 
 def test_a_layout_that_hurts_them_gets_one_warning():
-    assert "two pages" in layouts.fit_warning("executive", 3)
-    assert layouts.fit_warning("executive", 14) is None
+    assert "education first" in layouts.fit_warning("indian_placement", 5)
+    assert layouts.fit_warning("executive", 3) is None       # one page now
     assert layouts.fit_warning("charter", 3) is None
+
+
+def test_no_layout_allows_a_second_page():
+    assert all(v["max_pages"] == 1 for v in layouts.LAYOUTS.values())
 
 
 def test_an_unknown_saved_layout_falls_back_instead_of_failing():
@@ -151,10 +155,10 @@ def test_the_layout_they_name_becomes_their_default(conn, monkeypatch):
     assert "Tell them once" not in line
 
 
-def test_a_two_pager_at_three_years_is_built_with_one_warning(conn, monkeypatch):
+def test_a_senior_layout_at_three_years_is_built_without_a_warning(conn, monkeypatch):
     monkeypatch.setattr(chat, "_role_years", lambda c: ("PM", 3))
     key, line = chat._pick_layout({"layout": "executive"}, conn)
-    assert key == "executive" and "Tell them once" in line
+    assert key == "executive" and "Tell them once" not in line
 
 
 def test_a_look_that_matches_nothing_is_asked_about_not_guessed(conn):

@@ -437,7 +437,7 @@ def cmd_answer(args):
     job = {"title": row["title"], "company": row["company"],
            "apply_url": row["apply_url"], "source": row["source"],
            "source_id": row["source_id"]}
-    browser = agent.browser_for(job, args.id, fixture=args.fixture)
+    browser = agent.browser_for(job, args.id, fixture=args.fixture, resume=True)
     r = agent.resume_run(args.id, args.answer, browser, conn)
     print(f"{r['status']}: {r.get('question') or r.get('message') or r.get('detail','')}")
     conn.close()

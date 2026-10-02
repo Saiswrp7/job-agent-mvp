@@ -193,7 +193,7 @@ def test_browser_for_picks_cloud_only_when_asked(monkeypatch):
     made = []
 
     class Stub:
-        def __init__(self, url, app_id):
+        def __init__(self, url, app_id, resume=False):
             made.append((url, app_id))
 
     monkeypatch.setattr(cloud, "CloudBrowser", Stub)
@@ -240,7 +240,7 @@ def test_session_waits_when_every_browser_is_busy(monkeypatch):
     monkeypatch.setattr(cloud.httpx, "post", post)
     s = cloud.Session(app_id=9)
     assert s.id == "s1" and len(sent) == 3
-    assert sent[0]["timeout"] == cloud.SESSION_SECONDS
+    assert sent[0]["timeout"] == cloud.SESSION_SECONDS + cloud.KEEP_SECONDS
     assert s.replay_url.endswith("/sessions/s1")
 
 

@@ -458,7 +458,11 @@ def take_resume(name: str, data: bytes, conn) -> dict:
         return {"error": f"Could not read {name}: {type(exc).__name__}: {exc}"}
 
     jobs = ", ".join(e.get("company", "?") for e in master.get("experience", []))
-    return {"reply": (
+    # What the chat needs to carry on in its own words (Telegram). The fixed
+    # reply below is the web page's.
+    facts = {"name": master.get("name"), "roles": len(master.get("experience", [])),
+             "companies": jobs, "saved": len(rows)}
+    return {"facts": facts, "reply": (
         f"Read **{name}**.\n\n"
         f"I have you as **{master.get('name')}** — "
         f"{len(master.get('experience', []))} roles ({jobs}), "
