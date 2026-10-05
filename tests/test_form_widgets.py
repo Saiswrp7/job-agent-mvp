@@ -181,3 +181,30 @@ def test_a_cookie_panel_is_not_a_form(make):
     b = make(NOT_FOUND)
     assert b.page_state()["fields"] == 0
     assert all(f["type"] in ("checkbox", "radio") for f in b.read_form())
+
+
+# Counts real character key presses per box (not the Delete that empties
+# it or the Tab that leaves it): a pasted value fires none.
+KEYS = """<html><body><form>
+<label for="n">Full Name</label><input id="n" name="name">
+<label for="w">Why do you want to join us?</label><textarea id="w" name="why"></textarea>
+<label for="p">Expected salary</label><input id="p" name="pay" type="number">
+</form>
+<script>
+ window.presses = {};
+ for (const el of document.querySelectorAll('input, textarea'))
+   el.addEventListener('keydown', e => {
+     if (e.isTrusted && e.key.length === 1) window.presses[el.name] = (window.presses[el.name] || 0) + 1; });
+</script></body></html>"""
+
+
+def test_every_text_box_is_typed_with_real_keys(make):
+    b = make(KEYS)
+    b.read_form()
+    why = "I have run growth for a fintech app for four years. " * 5
+    assert len(why.strip()) > cloud.LONG_TEXT          # the long-text path too
+    assert b.fill_field("Full Name", "Asha Rao").startswith("filled")
+    assert b.fill_field("Why do you want to join us?", why.strip()).startswith("filled")
+    assert b.fill_field("Expected salary", "1200000").startswith("filled")
+    presses = b.page.evaluate("window.presses")
+    assert presses == {"name": len("Asha Rao"), "why": len(why.strip()), "pay": 7}

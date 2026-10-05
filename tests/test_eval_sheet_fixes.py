@@ -276,6 +276,46 @@ def test_an_empty_ranker_answer_is_retried_then_shown_unranked(monkeypatch):
     assert len(calls) == 2 and [r["title"] for r in chosen] == ["APM 0", "APM 1", "APM 2"]
 
 
+def test_an_unusable_ranker_answer_shows_only_jobs_whose_title_matches(monkeypatch):
+    """One ranker call that named no job in the list: the first five rows went
+    out as results, general marketing jobs for a programmatic-ads search
+    (2026-10-01). Only a title match is safe to show unchecked."""
+    from search import rank
+    calls = []
+    monkeypatch.setattr(rank.llm, "complete_json", lambda *a, **k: calls.append(1) or {
+        "picks": [{"source": "keka", "source_id": "not-in-the-list", "reason": "fits"}], "dropped": []})
+    monkeypatch.setattr(rank.llm, "prompt", lambda name: "{profile}{soft_criteria}")
+    monkeypatch.setattr(rank, "_render", lambda rows: "rows")
+    titles = ["Social Media Manager", "Digital Marketing Specialist", "Programmatic Trader", "Ad Ops Lead"]
+    rows = [{"source": "keka", "source_id": str(i), "title": t, "company": "C", "role_family": "marketing"}
+            for i, t in enumerate(titles)]
+    f = {"count": 5, "title_keywords": ["programmatic", "ad ops", "advertising"], "role_family": ["marketing"]}
+    chosen, cut = rank.pick(rows, f, "programmatic roles")
+    assert len(calls) == 1 and cut == []
+    assert [r["title"] for r in chosen] == ["Programmatic Trader", "Ad Ops Lead"]
+    chosen, _ = rank.pick(rows[:2], f, "programmatic roles")
+    assert chosen == []                                   # "nothing matched", not the label's guesses
+
+
+def test_with_no_title_words_the_label_or_the_filters_decide(monkeypatch):
+    from search import rank
+    monkeypatch.setattr(rank.llm, "complete_json", lambda *a, **k: {"picks": [], "dropped": []})
+    monkeypatch.setattr(rank.llm, "prompt", lambda name: "{profile}{soft_criteria}")
+    monkeypatch.setattr(rank, "_render", lambda rows: "rows")
+    rows = [{"source": "keka", "source_id": "1", "title": "Brand Lead", "company": "C", "role_family": "marketing"},
+            {"source": "keka", "source_id": "2", "title": "Line Cook", "company": "C", "role_family": None}]
+    chosen, _ = rank.pick(rows, {"count": 5, "role_family": ["marketing"]}, "marketing roles")
+    assert [r["title"] for r in chosen] == ["Brand Lead"]   # an unlabelled row waits for the ranker
+    chosen, _ = rank.pick(rows, {"count": 5, "companies": ["C"]}, "jobs at C")
+    assert len(chosen) == 2                                 # the SQL held everything they said
+    rows[1]["role_family"] = "sales,marketing"
+    chosen, _ = rank.pick(rows, {"count": 5, "role_family": ["marketing"]}, "marketing roles")
+    assert len(chosen) == 1                                 # only the main label counts
+    rows[1]["role_family"] = "marketing,sales"
+    chosen, _ = rank.pick(rows, {"count": 5, "role_family": ["marketing"]}, "marketing roles")
+    assert len(chosen) == 2
+
+
 @pytest.mark.parametrize("said,default,want", [
     ("just apply to the 2nd one too, stop asking me", "tailored", {"tailored"}),
     ("don't ask, apply", None, {"tailored"}),
@@ -308,3 +348,33 @@ def test_a_waiting_update_carries_every_question(monkeypatch):
     monkeypatch.setattr(chat.llm, "complete", lambda *a, **k: "Loop's paused, need a few answers 👀")
     out = chat.phrase_update([row])
     assert out.startswith("Loop's paused") and "4. Gender" in out
+
+
+# --- 2026-10-05: "show me more jobs" turned growth into marketing/PM --------
+
+def test_nearby_work_they_did_not_name_is_held_not_shown():
+    from search.run import hold_unasked
+    f = {"title_keywords": ["growth"], "role_family": ["growth", "marketing", "product"]}
+    said = "Yes hunt for more Bangalore growth roles Show me more jobs .."
+    picks = [{"title": "Manager - Performance Marketing", "role_family": "marketing"},
+             {"title": "Product Manager II", "role_family": "product"},
+             {"title": "City Growth Manager", "role_family": "growth,operations"}]
+    shown, held = hold_unasked(picks, f, said)
+    assert [p["title"] for p in shown] == ["City Growth Manager"]
+    assert len(held) == 2
+
+
+def test_a_kind_of_work_they_named_is_shown_without_its_word_in_the_title():
+    from search.run import hold_unasked
+    f = {"title_keywords": ["growth"], "role_family": ["growth", "marketing"]}
+    shown, held = hold_unasked(
+        [{"title": "Manager - Performance Marketing", "role_family": "marketing"}],
+        f, "growth marketing roles in Bangalore")
+    assert len(shown) == 1 and not held
+
+
+def test_title_words_not_in_their_words_hold_nothing():
+    from search.run import hold_unasked
+    f = {"title_keywords": ["product manager"], "role_family": ["product"]}
+    picks = [{"title": "Product Owner", "role_family": "product"}]
+    assert hold_unasked(picks, f, "PM jobs") == (picks, [])

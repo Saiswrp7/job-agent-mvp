@@ -72,8 +72,9 @@ SEARCHES = [
 def _role_sql(role: str) -> tuple[str, list]:
     words, families = ROLES[role]
     parts = ["lower(title) LIKE ?" for _ in words]
-    parts.append(f"role_family IN ({', '.join('?' for _ in families)})")
-    return "(" + " OR ".join(parts) + ")", [f"%{w}%" for w in words] + families
+    fam_sql, fam_params = db.family_match(families, main_only=True)
+    parts.append(fam_sql)
+    return "(" + " OR ".join(parts) + ")", [f"%{w}%" for w in words] + fam_params
 
 
 def count(conn: sqlite3.Connection, role: str, place: str,

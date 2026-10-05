@@ -181,6 +181,32 @@ def added_without_asking(f: dict, said: str) -> list[str]:
     return out
 
 
+def hold_unasked(picks: list[dict], f: dict, said: str) -> tuple[list[dict], list[dict]]:
+    """(shown, held): picks that are the kind of work they named, and the rest.
+
+    Sai, 2026-10-05: "show me more jobs" after a growth search came back as
+    Performance Marketing, Lead Marketing, Product Manager II and two GoKwik
+    marketing jobs. Bangalore had run out of new growth titles; the chat agent
+    had added "marketing and product" to the search on its own, and the label
+    match filled the list with them. Widening is fine, but they get asked first.
+
+    A pick is theirs when its title has a title word they said, or its label
+    is a kind of work they said. When none of the title words is in their own
+    words ("PM" for "product manager"), there is nothing to hold against, and
+    everything is shown as before."""
+    words = [w for w in (f.get("title_keywords") or []) if mentioned(w, said)]
+    if not words:
+        return picks, []
+    families = {x for x in (f.get("role_family") or []) if mentioned(x, said)}
+    shown, held = [], []
+    for p in picks:
+        title = (p.get("title") or "").lower()
+        main = (p.get("role_family") or "").split(",")[0]
+        (shown if any(w.lower() in title for w in words) or main in families
+         else held).append(p)
+    return shown, held
+
+
 _YEARS = re.compile(r"(\d{1,2})\+?\s*(?:years|yrs)", re.I)
 
 
@@ -248,10 +274,30 @@ def go_live(conn, target: tuple[str, str, bool]) -> tuple[list, str]:
     return [], "searched LinkedIn live just now — nothing new beyond what was here"
 
 
+def semantic_text(f: dict) -> str:
+    """What to look for by meaning, written like a job title because the jobs
+    are embedded as "title at company. kind of work. start of the posting":
+    "Growth Marketing Manager. growth, marketing." ranked the right jobs first
+    where the bare keywords ("apm associate product manager product manager")
+    pulled in every "Associate Project Manager" (measured 2026-10-04). Never the
+    place or level: those are filters, and a city in the text matched every
+    "Associate-Bangalore" title. Empty when they named no work ("I need a job"
+    would match anything)."""
+    kws = sorted((k.strip() for k in (f.get("title_keywords") or []) if k and k.strip()),
+                 key=len, reverse=True)
+    fams = ", ".join(x.replace("_", " ") for x in (f.get("role_family") or []))
+    soft = (f.get("soft_criteria") or "").strip()
+    if not (kws or fams or soft):
+        return ""
+    head = kws[0].title() if kws else ""
+    return " ".join(x for x in (f"{head}." if head else "", f"{fams}." if fams else "", soft) if x)
+
+
 def search(message: str, *, profile: str = "", conn=None,
            said_verbatim: str | None = None, fit_years: int | None = None,
            live: bool = False, said_recently: str | None = None,
-           exclude: list[str] | None = None) -> dict:
+           exclude: list[str] | None = None,
+           taken_refs: dict[str, str] | None = None) -> dict:
     """`live` allows one LinkedIn search while they wait, only when the table
     comes up short. Off by default so nothing reaches the network unasked —
     tests, evals and replays stay offline. `JOB_AGENT_LIVE=0` turns it off for
@@ -285,6 +331,11 @@ def search(message: str, *, profile: str = "", conn=None,
 
     if exclude:
         f["exclude"] = list(exclude)    # shown before: see chat search_jobs
+    # A search for a kind of work also looks by meaning (engine/vectors.py).
+    # "I need a job" names no work, and a meaning-search on it would add noise.
+    work = semantic_text(f)
+    if work:
+        f["semantic"] = work
     rows, f = query.search(f, conn, fit_years)
 
     # Sparse results relax in a fixed, logged order — never by asking a second
@@ -368,6 +419,8 @@ def search(message: str, *, profile: str = "", conn=None,
             picks += more
             dropped += more_dropped
 
+    picks, held = hold_unasked(picks, f, said_recently or said_text)
+
     # Still short with a city named: count what exists nearby and remotely, and
     # hand that over as a choice. Never as results.
     if len(picks) < f["count"] and conn is not None and f.get("city") \
@@ -381,6 +434,9 @@ def search(message: str, *, profile: str = "", conn=None,
             notes.append(
                 "other options they did not ask for — offer these as a choice, "
                 "do not show them as matches: possible roles " + ", ".join(options))
+
+    # Names no other job in this conversation has (see rank.name_refs).
+    rank.name_refs(picks, taken_refs)
 
     open_jobs = 0
     if conn is not None:
@@ -402,6 +458,8 @@ def search(message: str, *, profile: str = "", conn=None,
 
     return {
         "picks": picks,
+        # Good jobs, but not the kind of work they named: offered, not shown.
+        "held": held,
         "all_seen": all_seen,
         "dropped": dropped,
         "filters": f,

@@ -231,17 +231,23 @@ TOOLS = [
             "they uploaded, as-is), `updated` (their general resume with what "
             "they have told you since, fitted to the page) or `tailored` "
             "(rebuilt for this job). It is checked against what they actually said, so a choice "
-            "they did not make is refused and hands you the question to ask."),
+            "they did not make is refused and hands you the question to ask. "
+            "To retry an earlier application (interrupted, failed, blocked), "
+            "pass its `app_id` instead of `ref`: never search for the job again, "
+            "a search can find a different job with the same title."),
         "input_schema": {
             "type": "object",
             "properties": {
                 "ref": {"type": "string",
                         "description": "the [name] shown beside the job"},
+                "app_id": {"type": "integer",
+                           "description": "retry this earlier application: same job, "
+                                          "same resume choice"},
                 "resume": {"type": "string",
                            "enum": ["file", "updated", "tailored"],
                            "description": "the one they chose for this apply"},
             },
-            "required": ["ref"], "additionalProperties": False,
+            "additionalProperties": False,
         },
     },
     {
@@ -261,6 +267,19 @@ TOOLS = [
             "required": ["app_id", "answer"], "additionalProperties": False,
         },
         "strict": True,
+    },
+    {
+        "name": "cancel_application",
+        "description": (
+            "Call off applications they don't want: \"stop\", \"cancel\", \"not "
+            "these\", \"wrong ones\". Stops a filling run at its next step and "
+            "clears one waiting on them. Nothing is sent. Never for one that "
+            "was already sent."),
+        "input_schema": {
+            "type": "object",
+            "properties": {"app_ids": {"type": "array", "items": {"type": "integer"}}},
+            "required": ["app_ids"], "additionalProperties": False,
+        },
     },
     {
         "name": "application_status",
@@ -347,6 +366,9 @@ TOOL_FILES = {
     ],
     "application_status": [
         ["chat.py", "one read of the applications table"],
+    ],
+    "cancel_application": [
+        ["apply/worker.py", "stops the run at its next step · nothing sent"],
     ],
 }
 
@@ -558,6 +580,13 @@ def phrase_update(rows: list[dict], conn: sqlite3.Connection | None = None) -> s
             text = f"{text}\n{questions}"
         out.append(for_phone(text))
     return "\n".join(out)
+
+
+def untold(news: list[dict], reply: str) -> list[dict]:
+    """Updates the reply does not already cover. An approval card always goes."""
+    return [r for r in news
+            if (r.get("outcome") or "").startswith(confirm.READY)
+            or (r.get("company") or "").lower() not in (reply or "").lower()]
 
 
 def pagecheck_claims(text: str) -> bool:
@@ -819,6 +848,33 @@ def _by_ref(state: dict, ref: str) -> dict:
     )
 
 
+def _ref_of_application(conn: sqlite3.Connection, state: dict, app_id: int) -> str:
+    """The name of an earlier application's own job, added to this
+    conversation's jobs, for a retry.
+
+    After a restart the chat had no jobs, so to retry Zeta it searched
+    "Product Manager II at Zeta", found Zeta's OTHER PM II job, asked for the
+    resume again (the answer is kept per job) and applied there (2026-10-05).
+    The application row says which job it was; nothing needs finding."""
+    row = conn.execute("SELECT source, source_id FROM main.applications WHERE id = ?",
+                       (app_id,)).fetchone()
+    if not row or not row["source"]:
+        raise KeyError(f"no application {app_id} with a job on file")
+    job = conn.execute("SELECT * FROM jobs WHERE source = ? AND source_id = ?",
+                       (row["source"], row["source_id"])).fetchone()
+    if not job:
+        raise KeyError(f"application {app_id}'s job is no longer in our list")
+    from search.rank import name_refs
+    job = dict(job)
+    known = state.setdefault("by_ref", {})
+    for r, j in known.items():
+        if _key_of(j, r) == _key_of(job, ""):
+            return r
+    name_refs([job], {r: _key_of(j, r) for r, j in known.items()})
+    known[job["ref"]] = job
+    return job["ref"]
+
+
 def _key_of(job: dict, ref: str) -> str:
     """One key per job, whatever spelling of its ref the model used. The
     tailored resume Sai approved for Loop was filed under one spelling and
@@ -974,10 +1030,10 @@ def _started(app_id: int, job: dict, tailoring: bool, resume: str = "") -> str:
     # word for word every time and Sai called the bot static (2026-10-01).
     return (f"[{app_id}] STARTED, NOT SUBMITTED: {job['title']} — {job['company']}. "
             f"Running in the background: {first} {where}. "
-            f"Tell them in your own words, briefly, that you are on it (name the "
-            f"company; say which resume if it was not asked this message). It "
-            f"asks them if the form needs anything and shows them the whole form "
-            f"before anything is sent. It is FILLING: never say submitting, "
+            f"Say it in a few plain words, like \"Filling Swiggy, I'll let you "
+            f"know.\" (name the company; the resume only if it was not asked this "
+            f"message; several jobs = one line naming them all). No promises "
+            f"about showing the form. It is FILLING: never say submitting, "
             f"applied or done.")
 
 
@@ -1255,6 +1311,10 @@ def run_tool(name: str, args: dict, state: dict,
         # see them again (Sai: "no repetitive jobs; if we are out, tell me").
         again = bool(_SEE_AGAIN.search(state.get("user_message") or ""))
         exclude = [] if again else _seen_jobs(conn)
+        # A job the ranker turned down earlier in this message stays down: the
+        # Meesho copywriter was "not growth" in the first search, picked in
+        # the second, and listed as "(not really growth)" (2026-10-05).
+        exclude += [k for k in state.get("rejected") or [] if k not in exclude]
 
         from search.run import experience_years, search
         result = search(args["query"], profile=reconcile.read_profile(conn)[-1500:],
@@ -1269,7 +1329,9 @@ def run_tool(name: str, args: dict, state: dict,
                         # count and "did they actually ask for Bangalore" are
                         # both read from this, and neither survives the rewrite.
                         said_verbatim=state.get("user_message"),
-                        said_recently=" ".join(state.get("said") or []))
+                        said_recently=" ".join(state.get("said") or []),
+                        taken_refs={r: _key_of(j, r) for r, j in
+                                    (state.get("by_ref") or {}).items()})
         # What they are after, kept for the resume builder. The ranker got
         # this from the first day and `tailor` never did, so the search
         # knew they wanted to own a number and the document written off
@@ -1299,6 +1361,25 @@ def run_tool(name: str, args: dict, state: dict,
         }
         save_last(result["picks"])
         _mark_seen(conn, result["picks"])
+        state.setdefault("rejected", []).extend(
+            f"{d['source']}:{d['source_id']}" for d in result.get("dropped") or []
+            if d.get("source"))
+        held = result.get("held") or []
+        if held:
+            # Nearby work they did not name: asked about, never shown unasked,
+            # and no second search this message to go and find it anyway.
+            state["found_nothing"] = True
+            nearby = "; ".join(f"{h['title']} ({h['company']})" for h in held[:5])
+            ask = (f"\n\nNOT SHOWN: {len(held)} nearby roles they did not ask for: "
+                   f"{nearby}. Do not search again this message. ")
+            if result["picks"]:
+                return (result["text_agent"] + ask + "After the list, ask in one "
+                        "line if they want nearby roles too, naming the kinds "
+                        "(e.g. marketing, product).")
+            return ("No new jobs of the kind they asked for: every current match "
+                    "was shown before or did not fit." + ask + "Say that in one "
+                    "line and ask if they want the nearby kinds instead, naming "
+                    "them. Never list the nearby jobs as matches.")
         if not result["picks"] and result.get("all_seen"):
             state["found_nothing"] = True
             return (f"Nothing new: all {result['all_seen']} jobs that match this were "
@@ -1440,6 +1521,13 @@ def run_tool(name: str, args: dict, state: dict,
                 f"when they apply.")
 
     if name == "start_application":
+        if args.get("app_id") is not None:
+            try:
+                args = {**args, "ref": _ref_of_application(conn, state, int(args["app_id"]))}
+            except KeyError as exc:
+                return f"ERROR: {exc.args[0]}"
+        if not args.get("ref"):
+            return "ERROR: pass `ref` (a job from a search) or `app_id` (a retry)."
         job = _by_ref(state, args["ref"])
         if (gone := _gone(conn, job, state)):
             return gone
@@ -1627,10 +1715,9 @@ def run_tool(name: str, args: dict, state: dict,
             # bot answered "Submitting to Loop now" and nothing was submitting
             # (Loop, 2026-10-01). Say where it really is, per status.
             if row["status"] in ("running", "queued"):
-                return (f"[{app_id}] {row['company']}: NOT submitting. It is still FILLING "
-                        f"(their last change is going in). The whole form comes to them in "
-                        f"a moment, and only their 'submit' on that sends it. Tell them that "
-                        f"in a few words of your own. Never say submitting or sent.")
+                return (f"[{app_id}] {row['company']}: NOT submitting. It is still FILLING. "
+                        f"Say just that in a few words, like \"Still filling, I'll let you "
+                        f"know.\" Never say submitting or sent.")
             if row["status"] == "submitted":
                 return (f"[{app_id}] {row['company']}: already SENT, nothing to answer. "
                         f"Say it went through.")
@@ -1641,6 +1728,25 @@ def run_tool(name: str, args: dict, state: dict,
                "source_id": row["source_id"]}
         fixture, answer = state.get("fixture"), args["answer"]
         approved = False
+        if (row["question"] or "").startswith(confirm.READY) \
+                and confirm.wants_answers(state.get("user_message")) \
+                and not confirm.said_submit(state.get("user_message")):
+            # They only want to see it: no browser run, nothing changes. The
+            # stored answers are the ones a 'submit' would send.
+            shown = json.loads(row["confirm_values"] or "{}")
+            return (f"[{app_id}] {row['company']}: still waiting on their 'submit'. "
+                    f"Show them every answer below as it is, then ask 'good to go?'.\n"
+                    f"{confirm.full_list(shown)}")
+        msg = (state.get("user_message") or "").strip()
+        if (row["question"] or "").startswith(confirm.READY) \
+                and not confirm.said_submit(msg) and msg.endswith("?"):
+            # A question about it ("done?", "did it go?") is not a change to
+            # make: re-filling the whole form for it cost minutes and showed
+            # the same card again (2026-10-05).
+            shown = json.loads(row["confirm_values"] or "{}")
+            return (f"[{app_id}] {row['company']}: filled, NOT sent, waiting for their "
+                    f"'submit'. Answer their question in one line from the answers "
+                    f"below and ask: submit?\n{confirm.full_list(shown)}")
         if (row["question"] or "").startswith(confirm.READY):
             # The one answer that sends an application is read from what they
             # typed, never from the model's `answer`: a model that passes
@@ -1667,13 +1773,26 @@ def run_tool(name: str, args: dict, state: dict,
         # then asked seven more questions five minutes later (Swiggy, 2026-10-01).
         if approved:
             return (f"[{app_id}] {job['title']} — {job['company']}: SUBMITTING now, "
-                    f"they said submit. NOT SENT until an update says SUBMITTED. Tell "
-                    f"them in your own words, briefly, that it is going out and you "
-                    f"will confirm. Nothing else.")
+                    f"they said submit. NOT SENT until an update says SUBMITTED. Say "
+                    f"it in a few words, like \"Sending, I'll confirm.\" Nothing else.")
         return (f"[{app_id}] {job['title']} — {job['company']}: their answer is going "
-                f"into the form; it is still FILLING, not submitting. Tell them in "
-                f"your own words, briefly, that you are adding it and will show them "
-                f"the whole form before anything is sent. Never say submitting.")
+                f"into the form; it is still FILLING, not submitting. Say it in a few "
+                f"plain words, like \"Added, filling.\" (one line for all of them if "
+                f"several). No promises about showing the form. Never say submitting.")
+
+    if name == "cancel_application":
+        from apply import worker
+        out = []
+        for app_id in args.get("app_ids") or []:
+            before = worker.cancel(conn, int(app_id))
+            row = conn.execute("SELECT company, title FROM applications WHERE id = ?",
+                               (app_id,)).fetchone()
+            what = f"[{app_id}] {row['company']}" if row else f"[{app_id}]"
+            out.append(f"{what}: already SENT, cannot be called back" if before == "submitted"
+                       else f"{what}: may have gone already, cannot be called back"
+                       if before == "unconfirmed" else f"{what}: no such application"
+                       if before == "missing" else f"{what}: cancelled, nothing sent")
+        return "\n".join(out) + "\nSay it in one line."
 
     if name == "application_status":
         return applications(conn)
@@ -1730,6 +1849,7 @@ def reply(message: str, history: list, state: dict,
     # remember to clear them: the searches the model is allowed, and the
     # message a resume choice is read from (see `said_resume`).
     state["searched"] = []
+    state["rejected"] = []
     state["found_nothing"] = False
     state["outbox"] = []
     state["build_failed"] = None
@@ -1768,11 +1888,16 @@ def reply(message: str, history: list, state: dict,
         # Background results are written here by code, not left to the model:
         # told in its context to lead with them, it answered the question and
         # never mentioned that the application had finished.
-        if news:
+        # An update the reply already talks about is not sent again: Sai got
+        # "Zeta got cut off, I'll finish it later" and then "Not yet, the app
+        # restarted" as two messages (2026-10-05). The approval card always
+        # goes: it is what "submit" approves.
+        told = untold(news, text)
+        if told:
             if state.get("channel") == "telegram":
-                text = f"{phrase_update(news, conn)}\n{SPLIT}\n{text}"
+                text = f"{phrase_update(told, conn)}\n{SPLIT}\n{text}"
             else:
-                text = f"{news_lines(news)}\n\n{text}"
+                text = f"{news_lines(told)}\n\n{text}"
         if state.get("channel") != "telegram":
             text = text.replace(SPLIT, "\n\n")
         text = fix_links(text, list((state.get("by_ref") or {}).values())

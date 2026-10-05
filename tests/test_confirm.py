@@ -7,6 +7,8 @@ database. ALLOW_SUBMIT is set per test and only through monkeypatch.
 
 from __future__ import annotations
 
+import json
+
 import sys
 from pathlib import Path
 
@@ -46,13 +48,34 @@ def filled(conn, value="x"):
     return b
 
 
-def test_the_first_submit_parks_with_every_answer(conn, armed):
+def test_the_first_submit_parks_with_a_short_good_to_go(conn, armed):
     b = filled(conn)
     with pytest.raises(Park) as park:
         b.submit()
     q = park.value.question
-    assert q.startswith(confirm.READY) and "Acme" in q and "First Name: x" in q
-    assert "Reply 'submit'" in q
+    assert q.startswith(confirm.READY) and "Acme" in q and "Good to go?" in q
+    assert "First Name: x" not in q            # the list is behind "show answers"
+    assert "Reply 'submit'" in q and "show answers" in q
+    stored = json.loads(conn.execute(
+        "SELECT confirm_values FROM applications WHERE id=1").fetchone()[0])
+    assert stored["First Name"] == "x"         # what a yes approves is still kept
+
+
+@pytest.mark.parametrize("msg,ok", [("show answers", True), ("can i see everything", True),
+                                    ("what did you put in", True), ("submit", False),
+                                    ("change my notice period", False)])
+def test_show_answers_is_read_from_their_words(msg, ok):
+    assert confirm.wants_answers(msg) is ok
+
+
+def test_ask_user_gets_every_required_gap_in_one_list(conn):
+    from apply import harness
+    b = ManualBrowser("greenhouse_sample", app_id=1)
+    names = [f["label"] for f in b.read_form() if f.get("required")
+             and f.get("type") not in ("file", "checkbox", "textarea")]
+    extra = harness.uncovered(b, conn, "I need your " + names[0])
+    assert names[0] not in " ".join(extra)       # already asked, not repeated
+    assert len(extra) == len(names) - 1          # every other gap is added
 
 
 def test_approved_answers_are_sent(conn, armed):
@@ -111,7 +134,12 @@ def test_the_chat_approves_from_their_words_not_the_models(conn, armed, monkeypa
              "user_message": "hmm what is the notice period there?"}
     chat.run_tool("answer_application", {"app_id": 1, "answer": "yes submit"}, state, conn)
     assert conn.execute("SELECT confirmed_at FROM applications").fetchone()[0] is None
+    assert ran == []                     # a question is answered, not re-filled
+    state["user_message"] = "hmm change the notice period to 60 days"
+    chat.run_tool("answer_application", {"app_id": 1, "answer": "yes submit"}, state, conn)
+    assert conn.execute("SELECT confirmed_at FROM applications").fetchone()[0] is None
     assert "did not say submit" in ran[-1]
+    conn.execute("UPDATE applications SET status = 'waiting'")
     state["user_message"] = "submit"
     conn.execute("UPDATE applications SET status = 'waiting'")
     chat.run_tool("answer_application", {"app_id": 1, "answer": "ok"}, state, conn)

@@ -125,8 +125,27 @@ class Bot:
         self.token = token
         self.http = client or httpx.Client(timeout=60)
 
+    #: Waits before each retry of a dropped connection. Telegram reset the
+    #: connection twice on 2026-10-05 and the written reply never arrived: the
+    #: person read "Something broke (ReadError)" instead. A retry can send a
+    #: message twice if the reset came after Telegram took it; twice beats never.
+    RETRY_WAITS = (1.0, 3.0)
+
+    def _post(self, method: str, **kw) -> httpx.Response:
+        """One POST, retried on a dropped connection or timeout. getUpdates is
+        not retried here: the poll loop already retries it."""
+        waits = () if method == "getUpdates" else self.RETRY_WAITS
+        for wait in (*waits, None):
+            try:
+                return self.http.post(API.format(token=self.token, method=method), **kw)
+            except httpx.TransportError as exc:
+                if wait is None:
+                    raise
+                print(f"[telegram] {method} failed ({exc}); retrying in {wait:g}s")
+                time.sleep(wait)
+
     def call(self, method: str, **params):
-        r = self.http.post(API.format(token=self.token, method=method), json=params)
+        r = self._post(method, json=params)
         data = r.json()
         if not data.get("ok"):
             raise RuntimeError(f"telegram {method}: {data.get('description')}")
@@ -153,10 +172,9 @@ class Bot:
         """One multipart send. True when Telegram took it. A refusal is
         printed with Telegram's reason, so it shows up in the process log
         instead of vanishing: `send_document` used to drop the reply unread."""
-        with open(path, "rb") as f:
-            r = self.http.post(API.format(token=self.token, method=method),
-                               data={"chat_id": chat_id, "caption": plain(caption)[:1000]},
-                               files={field: (path.name, f)})
+        r = self._post(method,
+                       data={"chat_id": chat_id, "caption": plain(caption)[:1000]},
+                       files={field: (path.name, path.read_bytes())})
         try:
             data = r.json()
         except ValueError:

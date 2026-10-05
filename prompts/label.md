@@ -5,7 +5,7 @@ Return ONLY a JSON array, one object per job, in the same order:
 
 ```json
 [
-  {"id": "the id shown", "role_family": "growth", "level": "mid",
+  {"id": "the id shown", "role_family": ["growth"], "level": "mid",
    "years_min": 3, "owns_pnl": false, "country": "India",
    "work_mode": "hybrid"}
 ]
@@ -16,16 +16,21 @@ someone who wanted it; a null only means "unknown". Never guess.
 
 ## Fields
 
-`role_family` — what the person in this job does all day. Exactly one of:
+`role_family` — a list: every kind of work this job really does day to day,
+the main one first. Most jobs are one. A job that truly does two or three
+gets them all: a "Sales & Marketing Manager" who sells and runs campaigns is
+`["sales", "marketing"]`. Never add one for a passing mention ("works with
+the sales team" is not sales). From exactly these:
 
 engineering, data, product, design, growth, crm_lifecycle, marketing, sales,
 business_development, customer_success, support, operations, supply_chain,
 finance, hr, legal, content, research, healthcare, education, admin, other
 
-When the title names a function, that is the family: every kind of Product
-Manager (data PM, platform PM, AI PM) is `product`; every kind of engineer is
-`engineering`. Read the description only when the title is vague ("Associate",
-"Manager, CEO's Office", "Specialist").
+When the title names a function, that is the main family: every kind of
+Product Manager (data PM, platform PM, AI PM) is `product`; every kind of
+engineer is `engineering`. Add another only when the description shows the
+job doing that work too. When the title is vague ("Associate", "Manager, CEO's
+Office", "Specialist"), the description decides the family itself.
 
 Three that are easy to mix up, told apart by the work, never the title:
 - `growth` — owns a user or revenue metric (acquisition, activation,

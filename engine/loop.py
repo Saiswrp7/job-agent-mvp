@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
@@ -334,6 +335,50 @@ def maintain(conn: sqlite3.Connection) -> dict:
     return out
 
 
+#: New arrivals labelled per round, at most. A new board can bring thousands
+#: at once; the rest wait for the next round instead of one long stall.
+LABEL_PER_ROUND = 500
+#: Jobs embedded after each round of reads.
+EMBED_PER_ROUND = 1000
+
+
+def label_new(conn: sqlite3.Connection, since: str, verbose: bool = True) -> str:
+    """AI labels for the jobs that arrived since `since`, so a search finds
+    them by the kind of work and not only by a word in the title. Returns
+    where the next round starts: unchanged while some are left or a call
+    failed, so no arrival is skipped. Until 2026-10-02 only `cli.py sync` and
+    `cli.py label` labelled, never this loop, and 60% of open jobs had no role
+    label. One model call per 10 jobs (labels.BATCH). ENGINE_LABELS=0 turns
+    it off."""
+    if os.environ.get("ENGINE_LABELS") == "0":
+        return since
+    from . import labels
+    started = _sql_time(_now())
+    r = labels.run(conn, since=since, limit=LABEL_PER_ROUND, verbose=False)
+    if verbose and (r["labelled"] or r["stopped"]):
+        print(f"  labels: {r['labelled']} new jobs labelled"
+              + (f", stopped ({r['stopped']})" if r["stopped"] else ""), flush=True)
+    if r["stopped"] or r["failed_batches"] or r["pending"] >= LABEL_PER_ROUND:
+        return since
+    return started
+
+
+def embed_new(conn: sqlite3.Connection, verbose: bool = True) -> None:
+    """Meaning-vectors for the jobs that arrived (engine/vectors.py), so a
+    search can find them by what they are and not only by a word in the title.
+    A failed call costs nothing: the jobs are picked up next round.
+    ENGINE_EMBED=0 turns it off."""
+    if os.environ.get("ENGINE_EMBED") == "0":
+        return
+    from . import vectors
+    if not vectors.configured():
+        return
+    r = vectors.run(conn, limit=EMBED_PER_ROUND)
+    if verbose and (r["embedded"] or r["stopped"]):
+        print(f"  vectors: {r['embedded']} new jobs embedded"
+              + (f", stopped ({r['stopped']})" if r["stopped"] else ""), flush=True)
+
+
 async def run(*, once: bool = False, batch: int = 5000, verbose: bool = True,
               conn: sqlite3.Connection | None = None,
               transport: httpx.AsyncBaseTransport | None = None) -> dict:
@@ -349,6 +394,7 @@ async def run(*, once: bool = False, batch: int = 5000, verbose: bool = True,
         print(f"journal: {db.wal(conn)}")
     registry.sync_json(conn)
     last_maintained = None
+    label_from = _sql_time(_now())       # what arrives from here on gets labels
     totals = {"reads": 0, "ok": 0, "failed": 0, "new": 0, "closed": 0}
     async with client(transport) as c:
         while True:
@@ -359,6 +405,8 @@ async def run(*, once: bool = False, batch: int = 5000, verbose: bool = True,
                     totals["ok" if r["ok"] else "failed"] += 1
                     totals["new"] += r["new"]
                     totals["closed"] += r["closed"]
+                label_from = label_new(conn, label_from, verbose)
+                embed_new(conn, verbose)
             if last_maintained is None or _now() - last_maintained > MAINTENANCE_EVERY:
                 m = maintain(conn)
                 last_maintained = _now()

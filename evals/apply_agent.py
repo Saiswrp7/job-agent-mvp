@@ -429,6 +429,7 @@ def work_one(job: dict, key: str) -> dict:
         _wrap_close(b, captures, sessions, RUNS / f"{key}.png")
         print(f"[{key}] started, replay {getattr(b, 'replay_url', None)}", flush=True)
         result = agent.start(app_id, job, b, str(RESUME), conn)
+        r.setdefault("stage_log", []).extend(getattr(b, "stage_log", []))   # Stagehand tries
         status = result.get("status")
         print(f"[{key}] start -> {status}", flush=True)
         while status == "waiting" and r["resumes"] < MAX_RESUMES and resumable(result.get("question")):
@@ -437,6 +438,7 @@ def work_one(job: dict, key: str) -> dict:
             _wrap_close(b, captures, sessions, RUNS / f"{key}.png")
             r["resumes"] += 1
             result = agent.resume_run(app_id, ANSWER, b, conn)
+            r.setdefault("stage_log", []).extend(getattr(b, "stage_log", []))
             status = result.get("status")
             print(f"[{key}] resume {r['resumes']} -> {status}", flush=True)
         if status == "waiting":

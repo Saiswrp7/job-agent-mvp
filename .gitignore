@@ -16,3 +16,4 @@ scenario-runs/*.log
 scenario-runs/transcript-*.md
 jobs.db-shm
 jobs.db-wal
+.stagehand_extension_id

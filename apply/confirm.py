@@ -66,7 +66,21 @@ def said_submit(message: str | None) -> bool:
     """Their own message approves sending: "submit", "yes send it". A reply
     that also asks for a change ("yes but fix the notice period") does not."""
     text = message or ""
-    return bool(_YES.search(text)) and not _NO.search(text)
+    return (bool(_YES.search(text)) or _typed_submit(text)) and not _NO.search(text)
+
+
+def _typed_submit(text: str) -> bool:
+    """"Sumbit", "submti", "yea", "haan": Sai's approvals on a phone keyboard.
+    "Yea" to a ready Swiggy form was read as a change request, so the whole
+    form was filled again and shown again (2026-10-05)."""
+    import difflib
+    words = re.findall(r"[a-z]+", text.lower())
+    return any(w in _YES_TYPED or (5 <= len(w) <= 7 and
+               difflib.SequenceMatcher(None, w, "submit").ratio() >= 0.8)
+               for w in words)
+
+
+_YES_TYPED = {"yea", "yeah", "ya", "yup", "haan", "han", "sure"}
 
 
 def shown(values: dict, fields: list[dict]) -> dict[str, str]:
@@ -113,27 +127,40 @@ def same(before: dict | None, now: dict) -> bool:
     return all(_plain(before[k]) == _plain(now[k]) for k in now)
 
 
-def question(job: dict, answers: dict[str, str], changed: list[str] | None = None,
-             empty: list[str] | None = None, notes: list[str] | None = None) -> str:
-    lines = [f"{READY}: {job.get('title')} at {job.get('company')}."]
-    if changed:
-        lines.append("These changed since you said submit: " + ", ".join(changed) + ".")
-    lines.append("It is filled like this:")
-    # Long answers in full: each was cut at 120 characters, and Sai read his
-    # "why this company" answer as incomplete although all of it was sent
-    # (Swiggy, 2026-10-01). Only a card past Telegram's 4,096-character limit
-    # is shortened, longest answers first.
+def wants_answers(message: str | None) -> bool:
+    """They asked to see what was filled ("show answers", "what did you put")
+    instead of approving or changing it."""
+    return bool(re.search(r"\b(show|see|list|read)\b.*\b(answers?|it|all|everything|form)\b"
+                          r"|\bwhat (did|have) you (put|fill|enter|type)", message or "", re.I))
+
+
+def full_list(answers: dict[str, str]) -> str:
+    """Every filled answer, whole, for "show answers"."""
     budget = 3400 - sum(len(k) + 4 for k in answers)
     cap = 1200
     while cap > 150 and sum(min(len(v), cap) for v in answers.values()) > budget:
         cap -= 50
-    lines += [f"- {k}: {v if len(v) <= cap else v[:cap].rstrip() + '…'}" for k, v in answers.items()]
+    return "\n".join(f"- {k}: {v if len(v) <= cap else v[:cap].rstrip() + '…'}"
+                     for k, v in answers.items())
+
+
+def question(job: dict, answers: dict[str, str], changed: list[str] | None = None,
+             empty: list[str] | None = None, notes: list[str] | None = None) -> str:
+    """The one last question: good to go? Short on purpose (Sai, 2026-10-04:
+    ask everything first, then only "is it good to go?"). The answers are
+    stored with the question and a resumed run must match them exactly, so
+    approval still means these answers; "show answers" lists them."""
+    lines = [f"{READY}: {job.get('title')} at {job.get('company')}.",
+             f"Filled: {len(answers)} answers."]
+    if changed:
+        lines.append("These changed since you said submit: " + ", ".join(changed) + ".")
     if empty:
         lines.append("Left blank: " + "; ".join(e[:80] for e in empty) + ".")
     if notes:
         lines.append("Check these (a look at the page flagged them): "
                      + "; ".join(n[:120] for n in notes) + ".")
-    lines.append("Reply 'submit' to send it, or tell me what to change.")
+    lines.append("Good to go? Reply 'submit' to send it, 'show answers' to see "
+                 "everything, or tell me what to change.")
     return "\n".join(lines)
 
 

@@ -78,10 +78,10 @@ def test_years_of_experience_come_from_the_resume_summary():
 def test_long_answers_are_shown_in_full():
     why = ("I have spent my career in growth marketing and CRM, most recently owning CRM revenue "
            "and lifecycle monetization at Lenskart, and this role is a direct continuation.")
-    q = confirm.question({"title": "Manager", "company": "Swiggy"}, {"Why us": why, "Name": "Sai"})
+    q = confirm.full_list({"Why us": why, "Name": "Sai"})      # "show answers"
     assert why in q
     huge = {f"Q{i}": "x" * 900 for i in range(8)}             # past Telegram's limit
-    assert len(confirm.question({"title": "T", "company": "C"}, huge)) < 4096
+    assert len(confirm.full_list(huge)) < 4096
 
 
 # --- tailored: one job is shown first, a batch is not -----------------------------

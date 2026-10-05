@@ -45,7 +45,11 @@ FIELDS: dict[str, list[str]] = {
                          "experience years"],
     "notice_period":    ["notice period", "when can you join", "availability",
                          "available to join", "time to join", "days to join",
-                         "how soon can you join", "earliest joining"],
+                         "how soon can you join"],
+    # A date, kept apart from the notice period: "earliest joining date" was
+    # notice_period, and Atlys's 05/11/2026 replaced "30 days" (2026-10-05).
+    "joining_date":     ["joining date", "earliest joining", "date of joining",
+                         "start date", "earliest start"],
     "current_ctc":      ["current ctc", "current salary", "present compensation",
                          "total ctc"],
     "current_fixed_ctc": ["fixed salary", "current fixed", "fixed ctc", "fixed pay"],
@@ -103,12 +107,52 @@ def match_key(label: str) -> str | None:
         return None
     if re.search(r"\bmonths?\b", n) and "experience" in n:
         return None
+    pay = _pay_key(n)
+    if pay != "":
+        return pay
+    # Years in one field are not their total years: "How many years of
+    # experience do you have in Software Development?" got the total, and
+    # Zeta's form said 3 to 5 years of coding for someone with none
+    # (2026-10-05). Only the whole career, or "relevant", is on file.
+    if re.search(r"\bexperience\b", n) and re.search(
+            r"\b(in|with|of|using|on|as)\s+(?!total|overall|relevant|work|this|the role|years?\b)"
+            r"[a-z]", n.split("experience", 1)[1]):
+        return None
+    if re.search(r"\b(years?|yrs?)\s+(in|of|with|as)\s+(?!experience|total|work)", n):
+        return None
     for alias, key in _ALIASES:
         if alias == n:
             return key
     for alias, key in _ALIASES:
         if re.search(rf"\b{re.escape(alias)}\b", n):
             return key
+    return None
+
+
+_PAY = re.compile(r"\b(salary|ctc|compensation|pay|package|remuneration|earnings?)\b")
+_EXPECTED = re.compile(r"\b(expect\w*|desired|asking|want\w*|target)\b")
+_CURRENT = re.compile(r"\b(current\w*|present\w*|existing|last drawn|drawing)\b")
+
+
+def _pay_key(n: str) -> str | None:
+    """Which salary a pay question means: "" when it is not about pay, None
+    when it cannot be told (ask), else the key.
+
+    Expected versus current is the whole question. Before this the longest
+    alias won, so "Expected fixed CTC" matched `fixed ctc` and was filled
+    from, then saved into, the CURRENT fixed salary (14 LPA became 20), and
+    "current/expected annual salary" and "salary expectation" matched nothing
+    and were asked again although both were on file (2026-10-05)."""
+    if not _PAY.search(n):
+        return ""
+    if _EXPECTED.search(n):
+        return "expected_ctc"
+    if "variable" in n:
+        return "current_variable_ctc"
+    if "fixed" in n:
+        return "current_fixed_ctc"
+    if _CURRENT.search(n) or "total ctc" in n:
+        return "current_ctc"
     return None
 
 
@@ -163,6 +207,11 @@ def slice_for(labels: list[str], conn: sqlite3.Connection | None = None) -> dict
                 if key in _NAME_PARTS and _guessed_name(key, conn):
                     continue                  # ask once; a guess is not their answer
                 val = get(key, conn)
+                if key == "current_fixed_ctc" and not val \
+                        and _norm(get("current_variable_ctc", conn) or "") in _NONE:
+                    val = get("current_ctc", conn)    # no variable: all of it is fixed
+                if key == "joining_date" and not val:
+                    val = _join_date(get("notice_period", conn))
                 if key == "country" and not val:
                     val = country_of(get("phone", conn))      # +91 is India
                 if key == "location" and val and is_country(val):
@@ -176,6 +225,20 @@ def slice_for(labels: list[str], conn: sqlite3.Connection | None = None) -> dict
 
 
 _NAME_PARTS = ("first_name", "middle_name", "last_name")
+
+_NONE = {"0", "na", "n a", "nil", "none", "no"}
+
+
+def _join_date(notice: str | None, today=None) -> str | None:
+    """Earliest joining date from a notice period on file: "30 days" is today
+    plus 30, as YYYY-MM-DD. None when the notice is not a plain count."""
+    import datetime
+    m = re.fullmatch(r"(?:within\s+)?(\d{1,3})\s*(day|week|month)s?", _norm(notice or ""))
+    if not m:
+        return None
+    n, unit = int(m.group(1)), m.group(2)
+    days = n * {"day": 1, "week": 7, "month": 30}[unit]
+    return ((today or datetime.date.today()) + datetime.timedelta(days=days)).isoformat()
 
 
 def _guessed_name(key: str, conn: sqlite3.Connection) -> bool:

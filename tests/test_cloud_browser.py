@@ -316,3 +316,70 @@ def test_react_select_names_its_choices_when_none_match(greenhouse):
     greenhouse.read_form()
     out = greenhouse.fill_field("Do you have a valid driver's license?", "Sometimes")
     assert out.startswith("ERROR") and "'Yes', 'No', 'Prefer not to say'" in out
+
+
+# --- Stagehand under / before our filler (apply/stage.py) -----------------------
+
+class FakeStage:
+    """Stands in for Stagehand: does what it was told on the real page, or
+    nothing, so what the tests check is the page's value, not the fake."""
+
+    def __init__(self, page, works=True):
+        self.page, self.works, self.told = page, works, []
+
+    def act(self, instruction):
+        self.told.append(instruction)
+        if self.works:
+            self.page.fill('input[name="name"]', "Asha Rao")
+        return self.works, "typed"
+
+    def close(self):
+        pass
+
+
+def _staged(browser, mode, monkeypatch, works=True):
+    monkeypatch.setenv("APPLY_FILLER", mode)
+    browser._with_stage = True
+    browser._stage = FakeStage(browser.page, works)
+    browser.read_form()
+    return browser
+
+
+def test_ours_mode_never_calls_stagehand(browser, monkeypatch):
+    _staged(browser, "ours", monkeypatch)
+    browser.fill_field("Full name", "Asha Rao")
+    assert browser._stage.told == []
+
+
+def test_fallback_leaves_a_box_ours_filled_alone(browser, monkeypatch):
+    _staged(browser, "fallback", monkeypatch)
+    assert browser.fill_field("Full name", "Asha Rao") == "filled Full name"
+    assert browser._stage.told == []
+
+
+def test_fallback_rescues_a_box_ours_could_not_fill(browser, monkeypatch):
+    _staged(browser, "fallback", monkeypatch)
+    monkeypatch.setattr(browser, "_fill_ours", lambda n, v: "ERROR: would not keep it")
+    out = browser.fill_field("Full name", "Asha Rao")
+    assert out == "filled Full name (read from the page)"
+    assert browser.current_values()["Full name"] == "Asha Rao"
+    assert browser.stage_log[0][:2] == ("Full name", True)
+
+
+def test_stagehand_saying_done_is_not_enough_the_page_must_hold_it(browser, monkeypatch):
+    _staged(browser, "fallback", monkeypatch, works=False)
+    monkeypatch.setattr(browser, "_fill_ours", lambda n, v: "ERROR: would not keep it")
+    assert browser.fill_field("Full name", "Asha Rao").startswith("ERROR")
+    assert browser.stage_log[0][:2] == ("Full name", False)
+
+
+def test_stagehand_first_falls_back_to_ours_when_it_fails(browser, monkeypatch):
+    _staged(browser, "stagehand", monkeypatch, works=False)
+    assert browser.fill_field("Full name", "Asha Rao") == "filled Full name"
+    assert browser._stage.told, "Stagehand was tried first"
+
+
+def test_the_value_stagehand_gets_is_shaped_in_code(browser, monkeypatch):
+    _staged(browser, "stagehand", monkeypatch)
+    browser.fill_field("Full name", "ASHA")
+    assert '"Asha"' in browser._stage.told[0]            # shouted caps title-cased by _shape

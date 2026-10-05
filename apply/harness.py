@@ -101,6 +101,38 @@ def trace(conn: sqlite3.Connection, app_id: int, step: int, kind: str,
     conn.commit()
 
 
+def uncovered(browser: BaseBrowser, conn: sqlite3.Connection,
+              question: str) -> list[str]:
+    """Required boxes still empty that the model's question does not name.
+
+    The person gets ONE list per page. Swiggy and Konovo (2026-10-01) each
+    asked twice on the same page because the model's first question left
+    boxes out, and a second round on a phone is where people drop off. Code
+    adds what the model missed: required, empty, not a file, consent tick or
+    free-text box (the model fills those itself), and not already in the vault.
+    """
+    import vault
+    try:
+        fields = browser.read_form()
+        values = browser.current_values()
+        known = vault.slice_for([f.get("label") or f["name"] for f in fields], conn)
+    except Exception:                                  # noqa: BLE001
+        return []
+    asked = (question or "").lower()
+    out = []
+    for f in fields:
+        label = (f.get("label") or f["name"]).strip()
+        if not f.get("required") or values.get(f["name"]):
+            continue
+        if f.get("type") in ("file", "checkbox", "textarea") or label in known:
+            continue
+        if label.lower()[:40] in asked:
+            continue
+        opts = [str(o) for o in (f.get("options") or [])][:6]
+        out.append(label + (f" ({' / '.join(opts)})" if opts else ""))
+    return out
+
+
 def _run_tool(browser: BaseBrowser, name: str, args: dict) -> tuple[str, bool]:
     """(result_text, is_error). Park propagates — it is not an error."""
     try:
@@ -274,8 +306,15 @@ def run(app_id: int, browser: BaseBrowser, system: str,
         #: Submit refused because sending is not switched on for this person
         #: (SUBMIT_USERS): the outcome is written by code, see below.
         sending_off = False
+        #: Whether this run pressed Submit at all. A run that never did and
+        #: ends on a question is waiting for the person, not blocked.
+        tried_submit = False
 
+        from apply import worker
         for step in range(BUDGET):
+            if worker.cancelled(app_id):
+                trace(conn, app_id, step, "cancelled", {})
+                return {"status": "cancelled", "submitted": False, "steps": step}
             trace(conn, app_id, step, "prompt", {"messages": len(history)})
             llm.counted()      # this loop calls create() directly, not via llm
             reply = client.messages.create(
@@ -311,6 +350,15 @@ def run(app_id: int, browser: BaseBrowser, system: str,
                 # nothing; code has the last word on that.
                 if status == "blocked" and pagecheck.claims_sent(text):
                     text = pagecheck.NOT_SENT
+                # Questions written as its last words instead of an ask_user
+                # call. Atlys PM ended "blocked" asking for expected CTC and a
+                # joining date, so the answers had nowhere to go and the chat
+                # told Sai it was blocked (2026-10-05). It is waiting.
+                if status == "blocked" and not tried_submit and "?" in text:
+                    save(conn, app_id, history, "waiting", text.strip())
+                    trace(conn, app_id, step, "park", text.strip())
+                    return {"status": "waiting", "question": text.strip(),
+                            "steps": step}
                 if status == "submitted" and proof:
                     text = f"{proof}\n\n{text}"
                 save(conn, app_id, history, status)
@@ -321,8 +369,16 @@ def run(app_id: int, browser: BaseBrowser, system: str,
             for block in reply.content:
                 if block.type != "tool_use":
                     continue
+                if block.name == "ask_user" and isinstance(block.input, dict):
+                    extra = uncovered(browser, conn, block.input.get("question", ""))
+                    if extra:
+                        block.input["question"] = (
+                            block.input.get("question", "").rstrip()
+                            + "\nAlso needed:\n" + "\n".join(f"- {e}" for e in extra))
                 trace(conn, app_id, step, "tool_call",
                       {"name": block.name, "input": block.input})
+                if block.name in ("submit", "next_page") and worker.cancelled(app_id):
+                    return {"status": "cancelled", "submitted": False, "steps": step}
                 try:
                     out, is_error = _run_tool(browser, block.name, block.input)
                 except Park as park:
@@ -337,6 +393,8 @@ def run(app_id: int, browser: BaseBrowser, system: str,
                     learned = remember_answer(conn, history, block.input)
                     if learned:
                         trace(conn, app_id, step, "learned", learned)
+                if block.name == "submit":
+                    tried_submit = True
                 if block.name in ("submit", "next_page") and is_error \
                         and confirm.SENDING_OFF in out:
                     sending_off = True

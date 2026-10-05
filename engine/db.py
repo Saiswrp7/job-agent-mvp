@@ -139,6 +139,19 @@ CREATE TABLE IF NOT EXISTS saved_searches (
 """
 
 #: Private to one user: who they are, what they said, what they applied to.
+JOBS_SCHEMA += """
+-- One meaning-vector per job (engine/vectors.py): lets a search find "Growth
+-- Strategy" for "growth marketing". float16 bytes, normalised; `model` so a
+-- change of embedding model re-embeds instead of mixing two spaces.
+CREATE TABLE IF NOT EXISTS job_vec (
+    source    TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    model     TEXT NOT NULL,
+    vec       BLOB NOT NULL,
+    PRIMARY KEY (source, source_id)
+);
+"""
+
 USER_SCHEMA = """
 CREATE TABLE IF NOT EXISTS vault (
     key        TEXT PRIMARY KEY,
@@ -280,6 +293,28 @@ def visible() -> str:
     return VISIBLE
 
 
+def family_match(families: list[str], column: str = "role_family",
+                 main_only: bool = False) -> tuple[str, list]:
+    """SQL that is true when a job's labels include any of `families`.
+
+    `main_only`: only the job's MAIN label (the first) counts. The AI added
+    "growth" as a second label to a marketing job, an SEO job and a
+    copywriter, and "growth roles today" listed all three (Sai, 2026-10-05:
+    "no where close to growth"). Filters use the main label; the other labels
+    only help ordering.
+
+    A job carries every kind of work it really does, main one first, comma
+    separated ("growth,marketing"), since 2026-10-02: a job with two meanings
+    was labelled one of them, or nothing, and a search for the other missed
+    it. A single label is the one-item case, so older rows match unchanged;
+    NULL matches nothing."""
+    if main_only:
+        return ("(" + " OR ".join(f"({column} || ',') LIKE ?" for _ in families) + ")",
+                [f"{f},%" for f in families])
+    return ("(" + " OR ".join(f"(',' || {column} || ',') LIKE ?" for _ in families) + ")",
+            [f"%,{f},%" for f in families])
+
+
 #: Columns added after a table already shipped. `CREATE TABLE IF NOT EXISTS`
 #: silently leaves an existing table alone, so a jobs.db created before these
 #: existed would keep the old shape forever and every write would fail. Cheap
@@ -291,7 +326,7 @@ MIGRATIONS: list[tuple[str, str, str]] = [
     # Labels, written once per job by engine/labels.py so search can filter on
     # what a job *is* rather than what its title happens to say. NULL means
     # "not labelled yet" and is neutral at query time, never a mismatch.
-    ("jobs", "role_family", "TEXT"),     # growth, engineering, sales, ...
+    ("jobs", "role_family", "TEXT"),     # growth, engineering, ... or "growth,marketing"
     ("jobs", "level", "TEXT"),           # intern .. leadership
     ("jobs", "owns_pnl", "INTEGER"),     # 1 = accountable for a P&L / revenue line
     ("jobs", "country", "TEXT"),

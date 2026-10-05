@@ -11,9 +11,9 @@ These rules fill that gap for what is certain from the text alone:
 - **Only empty columns, only on rows the LLM has not read** (`label_hash IS
   NULL`). An LLM label is never overwritten. When the LLM does read the row
   later, its answer replaces these.
-- **One family or none.** A title that fits two families ("Sales & Marketing
-  Manager") gets none. NULL passes every filter; a wrong label is the one
-  thing that can hide a job.
+- **Every family the title names.** "Sales & Marketing Manager" gets
+  "sales,marketing", so a search for either finds it (2026-10-02; it used to
+  get none, which hid it from both label searches).
 - **Growth and CRM are never guessed from a title.** The label prompt tells
   them apart by the work, and half of "Growth Manager" roles in India are CRM.
 - **Adzuna's category only when the title says nothing,** and only for the
@@ -134,13 +134,16 @@ GROWTHISH = W(r"\bgrowth\b|\bretention\b|\blifecycle\b|\bcrm\b|\bengagement\b")
 
 
 def family(title: str, category: str | None = None) -> str | None:
+    """Every family the title names, in the order it names them: "Sales &
+    Marketing Manager" -> "sales,marketing" (see db.family_match)."""
     if GROWTHISH.search(title or ""):
         return None
-    hits = {fam for fam, rx in FAMILY_RULES if rx.search(title or "")
-            and not (fam in NOT_A_MATCH and NOT_A_MATCH[fam].search(title))}
-    if len(hits) == 1:
-        return hits.pop()
-    if not hits and category:
+    hits = sorted((m.start(), fam) for fam, rx in FAMILY_RULES
+                  if (m := rx.search(title or ""))
+                  and not (fam in NOT_A_MATCH and NOT_A_MATCH[fam].search(title)))
+    if hits:
+        return ",".join(fam for _, fam in hits)
+    if category:
         return CATEGORY_FAMILY.get(category)
     return None
 

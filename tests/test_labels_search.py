@@ -56,6 +56,15 @@ def test_clean_keeps_only_values_the_columns_accept():
                    "owns_pnl": 1, "country": "India", "work_mode": "remote"}
 
 
+def test_a_job_keeps_every_kind_of_work_it_does_main_one_first():
+    assert labels.clean({"role_family": ["Growth", "marketing", "wizardry", "growth"]}
+                        )["role_family"] == "growth,marketing"
+    assert labels.families(["other", "sales"]) == "sales"            # other only alone
+    assert labels.families(["other"]) == "other"
+    assert labels.families(list(labels.FAMILIES)).count(",") == labels.MAX_FAMILIES - 1
+    assert labels.families([]) is None and labels.families(None) is None
+
+
 def test_clean_rejects_nonsense_years():
     assert labels.clean({"years_min": 45})["years_min"] is None
     assert labels.clean({"years_min": True})["years_min"] is None
@@ -139,6 +148,16 @@ def test_the_label_finds_a_job_the_title_keyword_misses(conn):
     add(conn, "2", title="Sales Lead", role_family="sales")
     rows, _ = query.search({"title_keywords": ["ux"], "role_family": ["design"]}, conn)
     assert ids(rows) == {"1"}
+
+
+def test_only_a_jobs_main_label_matches(conn):
+    # 2026-10-05: a marketing job labelled "marketing,growth" came up for
+    # "growth roles". The second label orders; only the first filters.
+    add(conn, "both", title="Business Manager", role_family="growth,marketing")
+    add(conn, "one", title="Business Manager", role_family="marketing")
+    for fam, want in ((["growth"], {"both"}), (["marketing"], {"one"}), (["sales"], set())):
+        rows, _ = query.search({"title_keywords": ["zzz"], "role_family": fam}, conn)
+        assert ids(rows) == want, fam
 
 
 def test_country_filters_but_unknown_and_global_pass(conn):

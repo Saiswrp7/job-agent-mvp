@@ -12,6 +12,7 @@ Two rules carry the design:
 
 from __future__ import annotations
 
+import os
 import sqlite3
 
 from engine import db
@@ -137,8 +138,9 @@ def _where(f: dict) -> tuple[list[str], list]:
         role += ["lower(title) LIKE ?" for _ in f["title_keywords"]]
         params.extend(f"%{k.lower()}%" for k in f["title_keywords"])
     if f["role_family"]:
-        role.append(f"role_family IN ({', '.join('?' for _ in f['role_family'])})")
-        params.extend(f["role_family"])
+        fam_sql, fam_params = db.family_match(f["role_family"], main_only=True)
+        role.append(fam_sql)
+        params.extend(fam_params)
         if not f["title_keywords"]:
             role.append("role_family IS NULL")      # not labelled yet
     if role:
@@ -172,8 +174,9 @@ def _score(f: dict) -> tuple[str, list]:
         parts.append("2 * (owns_pnl = 1)")
     if f["role_family"] and f["title_keywords"]:
         # Title and label agree: the likeliest real match goes first.
-        parts.append(f"(role_family IN ({', '.join('?' for _ in f['role_family'])}))")
-        params.extend(f["role_family"])
+        fam_sql, fam_params = db.family_match(f["role_family"])
+        parts.append(fam_sql)
+        params.extend(fam_params)
     if not parts:
         return "0", []
     return "(" + " + ".join(f"COALESCE({p}, 0)" for p in parts) + ")", params
@@ -195,7 +198,30 @@ def _fit(years: int | None) -> tuple[str, list]:
             [years + 2, years, years])
 
 
-def build(filters: dict, fit_years: int | None = None) -> tuple[str, list, dict]:
+def _title_hit(f: dict) -> tuple[str, list]:
+    """1 when a word they searched for is in the title: the same test as the
+    WHERE clause, so it sorts title matches above jobs that got in on their
+    label alone. Without it the 20 rows the ranker reads are cut on forms and
+    recency: "growth marketing" matched 822 jobs, every one of the first 20
+    a marketing-labelled job with no "growth" in its title, and the first
+    "growth" title sat at #49 (2026-10-02)."""
+    if not f["title_keywords"]:
+        return "0", []
+    return ("(" + " OR ".join("lower(title) LIKE ?" for _ in f["title_keywords"]) + ")",
+            [f"%{k.lower()}%" for k in f["title_keywords"]])
+
+
+def _without_seen(clauses: list[str], params: list, exclude: list[str]) -> tuple[list[str], list]:
+    if not exclude:
+        return clauses, params
+    return ([*clauses, "(source || ':' || source_id) NOT IN "
+                       f"({', '.join('?' for _ in exclude)})"], [*params, *exclude])
+
+
+def build(filters: dict, fit_years: int | None = None,
+          only: list[tuple[str, str]] | None = None) -> tuple[str, list, dict]:
+    """`only`: just these (source, source_id) jobs, still visible and still
+    scored the same way. Used to fetch the jobs the meaning-search found."""
     # Jobs this person was already shown ("source:source_id"). Sai saw CRED
     # four times and Swiggy three across searches (2026-10-01): leaving them
     # out of the query, not the reply, lets the next five be new ones.
@@ -203,28 +229,33 @@ def build(filters: dict, fit_years: int | None = None) -> tuple[str, list, dict]
     f = normalize(filters)
     clauses, params = _where(f)
     if exclude:
-        clauses = [*clauses, "(source || ':' || source_id) NOT IN "
-                             f"({', '.join('?' for _ in exclude)})"]
-        params = [*params, *exclude]
+        clauses, params = _without_seen(clauses, params, exclude)
         f["exclude"] = exclude          # kept through every relax step
+    if only is not None:
+        clauses = [db.visible(), "(source, source_id) IN (VALUES "
+                   + ", ".join("(?, ?)" for _ in only) + ")"]
+        params = [x for k in only for x in k]
     score_sql, score_params = _score(f)
     fit_sql, fit_params = _fit(fit_years)
-    limit = min(f["count"] * OVERFETCH, MAX_ROWS)
+    title_sql, title_params = _title_hit(f)
+    limit = len(only) if only is not None else min(f["count"] * OVERFETCH, MAX_ROWS)
 
-    # Forms we can fill come before sites that want an account first: the
-    # person is on a phone, and a form is the one apply the agent finishes.
+    # A title with their word comes before a job that matched on its label
+    # alone. Within each, forms we can fill come before sites that want an
+    # account first: the person is on a phone, and a form is the one apply
+    # the agent finishes.
     sql = f"""
         SELECT source, source_id, company, title, city, remote, location,
                url, apply_url, posted_at, seniority, years_min, years_max,
                company_type, stage, industry, description,
                role_family, level, owns_pnl, country, work_mode, apply_kind,
-               {score_sql} AS hits, {fit_sql} AS fit
+               {score_sql} AS hits, {fit_sql} AS fit, {title_sql} AS title_hit
         FROM jobs
         WHERE {' AND '.join(clauses)}
-        ORDER BY fit DESC, {KIND_ORDER}, hits DESC, posted_at DESC
+        ORDER BY fit DESC, title_hit DESC, {KIND_ORDER}, hits DESC, posted_at DESC
         LIMIT ?
     """
-    return sql, [*score_params, *fit_params, *params, limit], f
+    return sql, [*score_params, *fit_params, *title_params, *params, limit], f
 
 
 def search(filters: dict, conn: sqlite3.Connection | None = None,
@@ -238,6 +269,10 @@ def search(filters: dict, conn: sqlite3.Connection | None = None,
     try:
         sql, params, f = build(filters, fit_years)
         rows = [dict(r) for r in conn.execute(sql, params)]
+        sem = (filters or {}).get("semantic")
+        if sem:
+            f["semantic"] = sem             # kept through every relax step
+            rows = blend(conn, f, rows, sem, fit_years, (filters or {}).get("exclude"))
 
         # Reserve a few slots for the freshest rows regardless of keyword hits,
         # so odd phrasing does not make a job invisible.
@@ -254,6 +289,50 @@ def search(filters: dict, conn: sqlite3.Connection | None = None,
     finally:
         if close_after:
             conn.close()
+
+
+#: Most jobs the meaning-search may add to one search, and how many it looks at.
+SEM_MAX = 5
+SEM_K = 30
+#: Least similarity (0-1) a job needs to be added. Measured 2026-10-04: right
+#: matches scored 0.55-0.68, "Associate Project Manager" for an APM search 0.60,
+#: so it cannot tell them apart by itself; the cap, the filters and the ranker do.
+SEM_FLOOR = float(os.environ.get("JOB_AGENT_SEM_FLOOR", "0.50"))
+
+
+def blend(conn: sqlite3.Connection, f: dict, rows: list[dict], sem: str,
+          fit_years: int | None, exclude: list[str] | None) -> list[dict]:
+    """SQL's rows plus up to SEM_MAX jobs closest in meaning to what they asked.
+
+    Same filters (city, level, country, seen) but no role word: the point is to
+    reach a job whose title lacks their word ("Performance Marketing" for
+    "growth marketing", "CRM" for "retention"). SQL's rows keep their order and
+    their places; the additions go after them, best match first, and push out
+    only the last SQL rows when the list is full. A job that plainly does not
+    suit their experience (`fit` 0) is never added. Any failure returns SQL's
+    rows untouched."""
+    from engine import vectors
+    try:
+        base = {**f, "title_keywords": None, "role_family": None}
+        clauses, params = _where(normalize(base))
+        clauses, params = _without_seen(clauses, params, [str(x) for x in (exclude or [])][:900])
+        allowed = {(r[0], r[1]) for r in conn.execute(
+            f"SELECT source, source_id FROM jobs WHERE {' AND '.join(clauses)}", params)}
+        have = {(r["source"], r["source_id"]) for r in rows}
+        near = [(s_, i_) for s_, i_, _ in
+                vectors.nearest(conn, sem, allowed, k=SEM_K, floor=SEM_FLOOR)
+                if (s_, i_) not in have]
+        if not near:
+            return rows
+        sql, p, _ = build({**f, "exclude": exclude or []}, fit_years, only=near)
+        found = {(r["source"], r["source_id"]): dict(r) for r in conn.execute(sql, p)}
+        extra = [found[k] for k in near if k in found and found[k].get("fit") != 0][:SEM_MAX]
+        for r in extra:
+            r["by_meaning"] = True
+        limit = min(f["count"] * OVERFETCH, MAX_ROWS)
+        return rows[:max(0, limit - len(extra))] + extra
+    except Exception:                                  # noqa: BLE001
+        return rows
 
 
 def relax(f: dict, protect: frozenset[str] | set[str] = frozenset()

@@ -429,7 +429,8 @@ def test_the_approval_lists_boxes_left_blank():
     q = confirm.question({"title": "PM", "company": "Co"},
                          confirm.shown({"a": "18 LPA"}, fields),
                          empty=confirm.blank({"a": "18 LPA", "b": ""}, fields))
-    assert "- Expected salary: 18 LPA" in q and "Left blank: Notice period." in q
+    assert "Left blank: Notice period." in q
+    assert "- Expected salary: 18 LPA" in confirm.full_list(confirm.shown({"a": "18 LPA"}, fields))
 
 
 @pytest.mark.parametrize("said,typed", [("12 LPA", "1200000"), ("12.5 lakh", "1250000"),

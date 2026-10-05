@@ -244,7 +244,7 @@ def test_rules_keep_a_value_already_there(conn):
 
 
 @pytest.mark.parametrize("title,category,expected", [
-    ("Sales & Marketing Manager", None, None),            # two families: none
+    ("Sales & Marketing Manager", None, "sales,marketing"),  # every family, title order
     ("Senior Growth Manager", "Sales Jobs", None),        # growth vs CRM: never guessed
     ("Retention Marketing Lead", None, None),
     ("Product Marketing Manager", None, "marketing"),
@@ -253,7 +253,7 @@ def test_rules_keep_a_value_already_there(conn):
     ("Relationship Manager", "Sales Jobs", "sales"),      # category, title silent
     ("Relationship Manager", "IT Jobs", None),            # IT names a dozen families
 ])
-def test_one_family_or_none(title, category, expected):
+def test_every_family_the_title_names_or_none(title, category, expected):
     assert rules.family(title, category) == expected
 
 

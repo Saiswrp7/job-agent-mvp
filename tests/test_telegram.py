@@ -214,3 +214,52 @@ def test_a_budget_is_read_per_person_from_the_settings(monkeypatch):
     assert tg.budget_for(1000000002) == 1.0
     assert tg.budget_for(123) == 2.5
     assert tg.budget_for(1000000001) is None
+
+
+def _flaky_bot(fail_times: int, monkeypatch):
+    """A Bot whose first `fail_times` requests have the connection reset."""
+    import httpx
+    hits = []
+
+    def handler(request):
+        hits.append(request.url.path.rsplit("/", 1)[-1])
+        if len(hits) <= fail_times:
+            raise httpx.ReadError("[Errno 54] Connection reset by peer")
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    monkeypatch.setattr(tg.time, "sleep", lambda s: None)
+    return tg.Bot("t", client=httpx.Client(transport=httpx.MockTransport(handler))), hits
+
+
+def test_a_reset_connection_is_retried_and_the_reply_still_goes(monkeypatch):
+    # 2026-10-05: two replies were lost to "Connection reset by peer" and the
+    # person read "Something broke (ReadError)".
+    bot, hits = _flaky_bot(2, monkeypatch)
+    bot.send(1, "5 more for you")
+    assert hits == ["sendMessage"] * 3
+
+
+def test_a_connection_that_stays_down_still_raises(monkeypatch):
+    import httpx
+    import pytest
+    bot, hits = _flaky_bot(99, monkeypatch)
+    with pytest.raises(httpx.ReadError):
+        bot.send(1, "hi")
+    assert len(hits) == 1 + len(tg.Bot.RETRY_WAITS)
+
+
+def test_polling_is_not_retried_inside_the_call(monkeypatch):
+    import httpx
+    import pytest
+    bot, hits = _flaky_bot(1, monkeypatch)
+    with pytest.raises(httpx.ReadError):
+        bot.call("getUpdates", offset=0, timeout=30)
+    assert hits == ["getUpdates"]
+
+
+def test_a_file_upload_is_retried(tmp_path, monkeypatch):
+    bot, hits = _flaky_bot(1, monkeypatch)
+    pdf = tmp_path / "Resume.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    bot.send_document(1, pdf)
+    assert hits == ["sendDocument", "sendDocument"]

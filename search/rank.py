@@ -111,9 +111,15 @@ def pick(rows: list[dict], filters: dict, message: str,
     cut = [d for d in resolve(dropped, "why")
            if (d["source"], str(d["source_id"])) not in shown]
     if not chosen and not cut:
-        # Still nothing, with jobs that matched every filter: show them in
-        # the table's order rather than tell the person there are none.
-        chosen = [{**r, "reason": ""} for r in rows[: filters["count"]]]
+        # The answer could not be used: nothing picked and nothing rejected,
+        # or every job it named missing from the list. Show, in the table's
+        # order, only the rows that fit their words with no judgement needed;
+        # none of those is "nothing matched". A row that got in on its label
+        # alone is exactly what this step exists to check: a programmatic-ads
+        # search pulled 20 general marketing jobs by the `marketing` label,
+        # and five went out as results (an invited user, 2026-10-01).
+        chosen = [{**r, "reason": ""} for r in rows
+                  if _plainly_matches(r, filters)][: filters["count"]]
     # One job once: the replay listed Clickpost's APM role twice.
     seen, unique = set(), []
     for r in chosen:
@@ -137,6 +143,21 @@ def _says_nothing(raw) -> bool:
     return isinstance(raw, dict) and not raw.get("picks") and not raw.get("dropped")
 
 
+def _plainly_matches(row: dict, filters: dict) -> bool:
+    """Whether a row fits the search on its own words, with no model's reading
+    of it: a title word they searched for is in its title (the same substring
+    test as the SQL), or, with no title words, its label is a kind of work they
+    asked for. With neither, the SQL held everything they said, so it fits."""
+    words = [w.lower() for w in filters.get("title_keywords") or []]
+    if words:
+        title = (row.get("title") or "").lower()
+        return any(w in title for w in words)
+    families = filters.get("role_family") or []
+    if families:
+        return (row.get("role_family") or "").split(",")[0] in families
+    return True
+
+
 def ref(job: dict) -> str:
     """A short name for one job, used everywhere a job is addressed.
 
@@ -147,11 +168,35 @@ def ref(job: dict) -> str:
     already drifted apart in half the conversations we recorded.
 
     A name can be wrong, and a wrong name raises. That is the entire point.
-    Derived from company and title, so it is also readable in a log.
+    Derived from company and title, so it is also readable in a log. Two jobs
+    with one company and title get different names from `name_refs`, kept on
+    the job as "ref".
     """
+    if job.get("ref"):
+        return job["ref"]
     slug = re.sub(r"[^a-z0-9]+", "-",
                   f"{job.get('company','')} {job.get('title','')}".lower())
     return slug.strip("-")[:48] or str(job.get("source_id", "job"))
+
+
+def name_refs(picks: list[dict], taken: dict[str, str] | None = None) -> None:
+    """Give each pick a name no other job has, in this list or in `taken`
+    (ref -> "source:source_id" of jobs shown earlier in the conversation).
+
+    Zeta had two "Product Manager II" jobs; both were zeta-product-manager-ii,
+    and a search for the one Sai applied to resolved to the other (2026-10-05).
+    The second gets "-2", the third "-3"."""
+    used = dict(taken or {})
+    for p in picks:
+        key = f"{p.get('source')}:{p.get('source_id')}"
+        p.pop("ref", None)
+        base = ref(p)
+        name, n = base, 1
+        while used.get(name, key) != key:
+            n += 1
+            name = f"{base}-{n}"
+        p["ref"] = name
+        used[name] = key
 
 
 def format_results(picks: list[dict], notes: list[str] | None = None,

@@ -32,6 +32,30 @@ from engine import db
 MAX_PARALLEL = 3
 _slots = threading.BoundedSemaphore(MAX_PARALLEL)
 _threads: dict[int, threading.Thread] = {}
+#: Runs the person called off. Checked by the harness before every step, so a
+#: run stops at its next step and never reaches Submit (Sai's "not from this"
+#: left four unwanted runs going, 2026-10-05).
+_cancelled: set[int] = set()
+
+
+def cancel(conn, app_id: int) -> str:
+    """Call off one application. Returns its status before."""
+    row = conn.execute("SELECT status FROM applications WHERE id = ?", (app_id,)).fetchone()
+    if row is None:
+        return "missing"
+    before = row[0]
+    if before in ("submitted", "unconfirmed"):
+        return before                       # gone or maybe gone: nothing to stop
+    _cancelled.add(app_id)
+    conn.execute("UPDATE applications SET status = 'cancelled', question = NULL, "
+                 "outcome = 'cancelled by them, nothing sent', reported = 1, "
+                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?", (app_id,))
+    conn.commit()
+    return before
+
+
+def cancelled(app_id: int) -> bool:
+    return app_id in _cancelled
 
 
 def _set(conn, app_id: int, status: str, outcome: str | None = None) -> None:
@@ -51,6 +75,8 @@ def _run(app_id: int, job: dict, work: Callable, connect: Callable) -> None:
             _set(conn, app_id, "running")
             r = work(conn)
         status = r.get("status", "failed")
+        if status == "cancelled" or cancelled(app_id):
+            return                          # cancel() already wrote the row
         message = r.get("question") or r.get("message") or r.get("detail") or ""
         # The harness has already written the status; this adds what the
         # person should hear, and marks it unreported.

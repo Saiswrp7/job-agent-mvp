@@ -34,7 +34,7 @@ from pathlib import Path
 
 import httpx
 
-from apply import pagecheck
+from apply import pagecheck, stage
 from apply.browser import SHOTS, BaseBrowser
 from apply.jev import _clean, _required, _short
 
@@ -97,7 +97,8 @@ def probe() -> tuple[bool, str]:
 class Session:
     """One Browserbase session: created, connected to, released."""
 
-    def __init__(self, app_id: int | None = None, tries: int = 6, url: str = ""):
+    def __init__(self, app_id: int | None = None, tries: int = 6, url: str = "",
+                 extension_id: str | None = None):
         keys = _keys()
         if keys is None:
             raise RuntimeError("cloud browser not set up: put BROWSERBASE_API_KEY "
@@ -112,6 +113,8 @@ class Session:
             # Survives the disconnect when a run parks (Browserbase keepAlive,
             # paid plans); released by hand when the run ends.
             body["keepAlive"] = True
+        if extension_id:
+            body["extensionId"] = extension_id      # Stagehand's (apply/stage.py)
         cap = custom_captcha(url)
         if cap:
             body["browserSettings"] = {"captchaImageSelector": cap[0],
@@ -658,6 +661,27 @@ def _digits(value: str) -> str:
     return re.sub(r"\D", "", value or "")
 
 
+#: Gap between key presses, in ms. Every text box is typed key by key, never
+#: pasted: Google's invisible check on Greenhouse and Ashby watches for key
+#: presses, and Ashby flagged a pasted application as spam (metaforms,
+#: 2026-10-01).
+KEY_DELAY = 40
+#: Past this many characters (a cover letter, a "why us"), no added gap: the
+#: round trip to the cloud browser already spaces the keys.
+LONG_TEXT = 200
+#: Time allowed per key, in ms. Each key is a round trip to the cloud browser,
+#: so a long answer outlasts the page's 8 s action limit: 39 of 259 keys got
+#: in before it (Browserbase Singapore, 2026-10-04).
+KEY_TIME = 600
+
+
+def _type_keys(loc, text: str) -> None:
+    """Empty a box, then type `text` into it with real key presses."""
+    loc.fill("")                                  # focus, empty
+    loc.press_sequentially(text, delay=0 if len(text) > LONG_TEXT else KEY_DELAY,
+                           timeout=max(8_000, len(text) * KEY_TIME))
+
+
 def _money(value: str, label: str) -> str | None:
     """A yearly salary as the box wants it: full rupees, or lakhs when the
     label asks in lakhs. None when it is not a salary the code can read.
@@ -737,6 +761,9 @@ class CloudBrowser(BaseBrowser):
 
     #: The session is billed while open; agent.start / resume_run close it.
     close_after_run = True
+    #: Stagehand (apply/stage.py): off until a session is made with its extension.
+    _stage = None
+    _with_stage = False
     #: Nobody can log in to a browser they cannot see.
     SIGN_IN = ("This job's page wants an account and a sign-in before it shows "
                "the application, and I can't sign in for you from here — I never "
@@ -749,6 +776,8 @@ class CloudBrowser(BaseBrowser):
         self.url = url
         self.session = None
         self._pw = self._browser = None
+        #: The session carries Stagehand's extension (a kept one does too).
+        self._with_stage = False
         #: Carrying on in the browser a parked run left open: the form is
         #: still filled, so the agent must not fill it again.
         self.resumed = False
@@ -759,7 +788,14 @@ class CloudBrowser(BaseBrowser):
             Session.attached(kept).release()  # a fresh start never reuses one
         if page is None:                  # tests hand in a local page
             from playwright.sync_api import sync_playwright  # noqa: PLC0415
-            self.session = Session(app_id, url=url)
+            ext = None
+            if stage.available():
+                try:
+                    ext = stage.extension_id()
+                except Exception as exc:              # noqa: BLE001
+                    print(f"[apply] Stagehand is off for this run: {exc}")
+            self.session = Session(app_id, url=url, extension_id=ext)
+            self._with_stage = bool(ext)
             try:
                 self._pw = sync_playwright().start()
                 self._browser = self._pw.chromium.connect_over_cdp(self.session.connect_url)
@@ -779,6 +815,8 @@ class CloudBrowser(BaseBrowser):
             except Exception:                         # noqa: BLE001
                 pass     # no form yet: open_form looks for its Apply button
         self.page = page
+        #: Stagehand tries per box: [(field, held, seconds)], for the eval.
+        self.stage_log: list[tuple[str, bool, float]] = []
         # A box that will not take an action gives up in 8 s, not Playwright's
         # 30: six read-only boxes on Keka's form cost three minutes (Loop,
         # 2026-10-01). Page loads keep their own longer timeouts.
@@ -1033,7 +1071,7 @@ class CloudBrowser(BaseBrowser):
                 return value.title(), "name"
         return value, ""
 
-    def fill_field(self, name: str, value: str) -> str:
+    def _fill_ours(self, name: str, value: str) -> str:
         try:
             spot = self._spot(name)
             if spot is None:
@@ -1096,6 +1134,69 @@ class CloudBrowser(BaseBrowser):
         except Exception as exc:                      # noqa: BLE001
             return f"ERROR filling {name}: {exc}"
 
+    def fill_field(self, name: str, value: str) -> str:
+        """One box. Our code by default; Stagehand under it or before it when
+        APPLY_FILLER says so (apply/stage.py). The value is shaped here either
+        way, and what counts is what the page then holds."""
+        mode = stage.filler() if self._with_stage else "ours"
+        if mode == "stagehand":
+            done = self._fill_stage(name, value)
+            return done if done is not None else self._fill_ours(name, value)
+        out = self._fill_ours(name, value)
+        if mode == "fallback" and (out.startswith("ERROR") or "rather than" in out):
+            done = self._fill_stage(name, value)
+            if done is not None and not done.startswith("ERROR"):
+                return done
+        return out
+
+    def _stage_open(self):
+        if self._stage is None and self.session is not None:
+            self._stage = stage.Stage(self.session.id)
+        return self._stage
+
+    def _stage_close(self) -> None:
+        if self._stage is not None:
+            self._stage.close()
+            self._stage = None
+
+    def _fill_stage(self, name: str, value: str) -> str | None:
+        """Stagehand fills one box; the text to return when the page now holds
+        the value, None when it does not (so the other filler still gets a go)."""
+        t0 = time.time()
+        if not hasattr(self, "stage_log"):
+            self.stage_log = []
+        try:
+            spot = self._spot(name)
+            if spot is None:
+                return None
+            label = spot.get("label") or name
+            shaped, how = self._shape(name, spot, value)
+            if shaped.startswith("ERROR:"):
+                return shaped
+            if spot["kind"] in ("radio", "checkbox") and "options" in spot:
+                instruction = (f'For the question "{label}", choose the option "{value}". '
+                               f"Tick only that one.")
+            elif spot["kind"] == "checkbox":
+                instruction = f'Tick the checkbox "{label}".'
+            elif spot["kind"] in ("select", "date"):
+                instruction = f'Set the "{label}" box to "{shaped}".'
+            else:
+                instruction = f'Type "{shaped}" into the "{label}" box.'
+            ok, said = self._stage_open().act(instruction)
+            got = self.current_values().get(name, "")
+            held = bool(got) and (
+                _same(shaped) in _same(got) or _same(value) in _same(got)
+                or (bool(_digits(shaped)) and _digits(got) == _digits(shaped)))
+            self.stage_log.append((name, held, round(time.time() - t0, 1)))
+            if not held:
+                return None
+            self.filled[name] = shaped
+            return f"filled {name} (read from the page)"
+        except Exception as exc:                      # noqa: BLE001
+            self.stage_log.append((name, False, round(time.time() - t0, 1)))
+            print(f"[apply] Stagehand could not fill {name}: {exc}")
+            return None
+
     def _choose(self, name: str, spot: dict, value: str) -> str:
         opts = spot["options"]
         wanted = ([v.strip() for v in value.split(",")] if spot["kind"] == "checkbox"
@@ -1149,12 +1250,13 @@ class CloudBrowser(BaseBrowser):
             self.filled[name] = got
             return f"filled {name} with {got!r}"
         if spot["format"] == "YYYY-MM-DD" and loc.get_attribute("type") == "date":
-            loc.fill(text)                            # a native date input
+            # A native date input: its keys go to day/month/year boxes in the
+            # browser's own order, so "2026-10-15" typed would land wrong.
+            loc.fill(text)
         else:
             # A calendar widget parses keystrokes; a pasted value is thrown
             # away when it closes. Tab closes it and keeps the date.
-            loc.fill("")
-            loc.press_sequentially(text, delay=30)
+            _type_keys(loc, text)
             loc.press("Tab")
         self.page.wait_for_timeout(300)
         got = self._settled(spot["ref"])
@@ -1236,20 +1338,11 @@ class CloudBrowser(BaseBrowser):
         guard cannot stop a keypress.
         """
         before = {o["text"] for o in self.page.evaluate(_VISIBLE_OPTIONS, _OPTIONS)}
-        # Each Playwright action costs about a second over the wire, so no
-        # extra click or clear: fill() focuses and replaces on its own.
         suggests = spot.get("suggests")
-        if suggests:
-            loc.fill("")                              # focus, empty
-            loc.press_sequentially(value, delay=40)   # real keys wake the lookup
-        elif spot["kind"] == "number":
-            # SmartRecruiters' salary box (a number field in a web component)
-            # ignored fill() and went back to 0 on blur (Swiggy, 2026-10-01).
-            # Real keys, digits only: a number box takes no "LPA".
-            loc.fill("")
-            loc.press_sequentially(_number(value), delay=40)
-        else:
-            loc.fill(value)
+        # Real keys also wake a lookup. A number box takes digits only, no
+        # "LPA" (SmartRecruiters' salary box went back to 0, Swiggy 2026-10-01).
+        number = spot["kind"] == "number" and not suggests
+        _type_keys(loc, _number(value) if number else value)
         picked, offered = "", []
         # A suggestion box looks its list up online: Lever's took 1.1 s, and
         # its first list can be for a half-typed word. So keep looking until
@@ -1650,6 +1743,7 @@ class CloudBrowser(BaseBrowser):
             page = ctx.pages[0]
             page.evaluate("1")                        # alive, not a dead tab
             self.session = Session.attached(kept)
+            self._with_stage = bool(kept.get("stage"))
             self.resumed = True
             return page
         except Exception as exc:                      # noqa: BLE001
@@ -1691,10 +1785,12 @@ class CloudBrowser(BaseBrowser):
             self.screenshot()
         except Exception:                             # noqa: BLE001
             pass
+        self._stage_close()
         conn.execute("UPDATE applications SET kept_session = ? WHERE id = ?",
                      (json.dumps({"id": s.id, "connect_url": s.connect_url,
                                   "until": until, "started": s.started, "timeout": s.timeout,
-                                  "earlier": self._earlier}), self.app_id))
+                                  "earlier": self._earlier, "stage": self._with_stage}),
+                      self.app_id))
         conn.commit()
         try:
             if self._pw:
@@ -1712,6 +1808,7 @@ class CloudBrowser(BaseBrowser):
                 self.screenshot()
             except Exception:                         # noqa: BLE001
                 pass
+        self._stage_close()
         try:
             if self._browser:
                 self._browser.close()

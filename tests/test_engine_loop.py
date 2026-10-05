@@ -294,6 +294,50 @@ def test_forms_we_can_fill_come_before_sign_up_sites(conn):
     assert [r["source_id"] for r in query.search({}, conn)[0]] == ["form", "acct"]
 
 
+def test_a_title_with_their_word_comes_before_a_label_only_match(conn):
+    """"growth marketing": 20 marketing-labelled forms filled the ranker's 20
+    rows and the first "growth" title sat at #49 (2026-10-02)."""
+    from search import query
+    for sid, src, title, fam in (("label", "lever", "Social Media Manager", "marketing"),
+                                 ("title", "workday", "Manager - Growth Strategy", None)):
+        db.upsert(conn, [adapters._row(source=src, source_id=sid, company="A", title=title,
+                                       location="Pune", description="x",
+                                       url=f"https://x/{sid}", posted_at=ago(1))])
+        conn.execute("UPDATE jobs SET role_family = ? WHERE source_id = ?", (fam, sid))
+    f = {"title_keywords": ["growth"], "role_family": ["growth", "marketing"]}
+    assert [r["source_id"] for r in query.search(f, conn)[0]] == ["title", "label"]
+
+
+def test_the_loop_labels_new_arrivals_and_leaves_older_jobs(conn, monkeypatch):
+    from engine import labels
+    for sid in ("old", "new"):
+        db.upsert(conn, [adapters._row(source="lever", source_id=sid, company="A", title="Growth Lead",
+                                       location="Pune", description="x",
+                                       url=f"https://x/{sid}", posted_at=ago(1))])
+    conn.execute("UPDATE jobs SET first_seen = '2026-01-01 00:00:00' WHERE source_id = 'old'")
+    asked = []
+    monkeypatch.setattr(labels, "ask", lambda rows, via=None: asked.extend(r["source_id"] for r in rows)
+                        or [labels.clean({"role_family": "growth"}) for _ in rows])
+    since = "2026-06-01 00:00:00"
+    nxt = loop.label_new(conn, since, verbose=False)
+    assert asked == ["new"] and nxt > since
+    got = {r[0]: r[1] for r in conn.execute("SELECT source_id, role_family FROM jobs")}
+    assert got == {"new": "growth", "old": None}
+
+
+def test_a_failed_label_call_keeps_the_window_so_nothing_is_skipped(conn, monkeypatch):
+    from engine import labels
+    db.upsert(conn, [adapters._row(source="lever", source_id="j", company="A", title="Growth Lead",
+                                   location="Pune", description="x", url="https://x/j",
+                                   posted_at=ago(1))])
+    monkeypatch.setattr(labels, "ask", lambda rows, via=None: 1 / 0)
+    monkeypatch.setattr(labels, "backup", lambda: None)
+    assert loop.label_new(conn, "2026-06-01 00:00:00", verbose=False) == "2026-06-01 00:00:00"
+    monkeypatch.setenv("ENGINE_LABELS", "0")
+    monkeypatch.setattr(labels, "run", lambda *a, **k: pytest.fail("labelled with ENGINE_LABELS=0"))
+    assert loop.label_new(conn, "2026-06-01 00:00:00", verbose=False) == "2026-06-01 00:00:00"
+
+
 # --- the bridge and the registry ----------------------------------------------------------
 
 @pytest.mark.parametrize("text,days", [

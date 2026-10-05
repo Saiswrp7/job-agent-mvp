@@ -32,6 +32,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import llm
 
+from . import db
+
 FAMILIES = {
     "engineering", "data", "product", "design", "growth", "crm_lifecycle",
     "marketing", "sales", "business_development", "customer_success",
@@ -40,6 +42,9 @@ FAMILIES = {
 }
 LEVELS = {"intern", "junior", "mid", "senior", "lead", "leadership"}
 WORK_MODES = {"onsite", "hybrid", "remote"}
+#: Kinds of work kept per job. A job that truly does more than this is the
+#: model listing everything, which would put the job in every search.
+MAX_FAMILIES = 4
 
 #: Jobs per model call. Ten keeps the reply short enough to come back whole
 #: from a cheap model, and makes the instructions a tenth of the bill.
@@ -77,13 +82,19 @@ def model(via: str | None = None) -> str:
 # --- reading and writing ---------------------------------------------------
 
 def pending(conn: sqlite3.Connection, limit: int | None = None,
-            only: list[tuple[str, str]] | None = None) -> list[dict]:
+            only: list[tuple[str, str]] | None = None,
+            since: str | None = None) -> list[dict]:
     """Open jobs with no labels, or labels read from older text. Newest first,
-    so a capped run spends itself on what people are most likely to see."""
+    so a capped run spends itself on what people are most likely to see.
+    `since` keeps to jobs first seen at or after it that a search can show:
+    the engine loop labels its new arrivals with it."""
     sql = ("SELECT source, source_id, title, company, location, description, "
            "content_hash FROM jobs WHERE closed_at IS NULL "
            "AND (label_hash IS NULL OR label_hash != content_hash)")
     params: list = []
+    if since:
+        sql += f" AND first_seen >= ? AND {db.visible()}"
+        params.append(since)
     if only:
         sql += " AND (" + " OR ".join(
             "(source = ? AND source_id = ?)" for _ in only) + ")"
@@ -123,13 +134,28 @@ def clean(raw: dict) -> dict:
     country = raw.get("country")
     country = (country.strip()[:40] or None) if isinstance(country, str) else None
     return {
-        "role_family": pick("role_family", FAMILIES),
+        "role_family": families(raw.get("role_family")),
         "level": pick("level", LEVELS),
         "years_min": years,
         "owns_pnl": 1 if pnl is True else 0 if pnl is False else None,
         "country": country,
         "work_mode": pick("work_mode", WORK_MODES),
     }
+
+
+def families(raw) -> str | None:
+    """The kinds of work, as stored: "growth,marketing", main one first, or
+    None. A list or a bare string; unknown names dropped, never forced;
+    `other` only when nothing else fits."""
+    items = [raw] if isinstance(raw, str) else raw if isinstance(raw, list) else []
+    kept: list[str] = []
+    for v in items:
+        v = v.strip().lower() if isinstance(v, str) else None
+        if v in FAMILIES and v not in kept:
+            kept.append(v)
+    if len(kept) > 1 and "other" in kept:
+        kept.remove("other")
+    return ",".join(kept[:MAX_FAMILIES]) or None
 
 
 def ask(rows: list[dict], via: str | None = None) -> list[dict | None]:
@@ -169,19 +195,20 @@ def write(conn: sqlite3.Connection, row: dict, labels: dict) -> None:
 
 def run(conn: sqlite3.Connection, *, limit: int | None = None,
         only: list[tuple[str, str]] | None = None,
-        workers: int = WORKERS, verbose: bool = True) -> dict:
+        workers: int = WORKERS, verbose: bool = True,
+        since: str | None = None) -> dict:
     """Label what needs it. `only` restricts to specific jobs — the live search
     uses it to label the handful it just fetched, and nothing else.
 
     If the main provider stops (the usual cause is running out of credit), the
     rest goes to the backup rather than waiting for tomorrow."""
-    report = _run(conn, limit, only, workers, verbose, provider())
+    report = _run(conn, limit, only, workers, verbose, provider(), since)
     spare = backup()
     if report["stopped"] and spare:
         if verbose:
             print(f"  {provider()} stopped ({report['stopped']}); "
                   f"continuing on {spare}")
-        more = _run(conn, limit, only, workers, verbose, spare)
+        more = _run(conn, limit, only, workers, verbose, spare, since)
         report = {**more,
                   "labelled": report["labelled"] + more["labelled"],
                   "skipped": report["skipped"] + more["skipped"],
@@ -190,8 +217,9 @@ def run(conn: sqlite3.Connection, *, limit: int | None = None,
     return report
 
 
-def _run(conn, limit, only, workers, verbose, via: str) -> dict:
-    rows = pending(conn, limit, only)
+def _run(conn, limit, only, workers, verbose, via: str,
+         since: str | None = None) -> dict:
+    rows = pending(conn, limit, only, since)
     batches = [rows[i:i + BATCH] for i in range(0, len(rows), BATCH)]
     report = {"pending": len(rows), "labelled": 0, "skipped": 0,
               "failed_batches": 0, "stopped": None}

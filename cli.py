@@ -130,6 +130,17 @@ def cmd_label(args):
     conn.close()
 
 
+def cmd_embed(args):
+    import time
+    from engine import vectors
+    conn = db.connect()
+    t = time.time()
+    r = vectors.run(conn, limit=args.limit)
+    print(f"{r['embedded']} embedded, {r['left']} left, {time.time() - t:.0f}s"
+          + (f", stopped: {r['stopped']}" if r["stopped"] else ""))
+    conn.close()
+
+
 def cmd_verify(args):
     from engine.sync import verify
     rows = asyncio.run(verify())
@@ -516,6 +527,24 @@ def cmd_telegram(args):
     telegram_bot.serve()
 
 
+def cmd_service(args):
+    """Bot and engine under launchd: up after a reboot, back after a crash.
+    `restart` refuses while someone is mid-application (ops.busy)."""
+    import ops
+    names = [args.name] if args.name else list(ops.SERVICES)
+    if args.action == "install":
+        for n in names:
+            print(ops.install(n))
+    elif args.action == "restart":
+        for n in names:
+            print(ops.restart(n, force=args.force))
+    elif args.action == "busy":
+        print("\n".join(ops.busy()) or "nothing in flight: safe to restart")
+    else:
+        for n in names:
+            print(f"{n}: {'running under launchd' if ops.installed(n) else 'not installed'}")
+
+
 def cmd_web(args):
     """Same agent, same `chat.reply`, rendered in a browser instead."""
     import web
@@ -652,6 +681,9 @@ def main():
     s.add_argument("--redo", action="store_true",
                    help="relabel every job, e.g. after changing the model")
     s.set_defaults(fn=cmd_label)
+    s = sub.add_parser("embed", help="meaning-vectors for jobs that have none")
+    s.add_argument("--limit", type=int, default=100000)
+    s.set_defaults(fn=cmd_embed)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("stats").set_defaults(fn=cmd_stats)
     s = sub.add_parser("cost", help="what the AI cost, per person and task")
@@ -701,6 +733,12 @@ def main():
 
     s = sub.add_parser("telegram", help="conversational mode, on Telegram (invited ids only)")
     s.set_defaults(fn=cmd_telegram)
+
+    s = sub.add_parser("service", help="bot + engine under launchd: install | restart | busy | status")
+    s.add_argument("action", choices=["install", "restart", "busy", "status"])
+    s.add_argument("name", nargs="?", choices=["telegram", "engine"])
+    s.add_argument("--force", action="store_true", help="restart even if someone is mid-application")
+    s.set_defaults(fn=cmd_service)
 
     s = sub.add_parser("search"); s.add_argument("query", nargs="+")
     s.set_defaults(fn=cmd_search)
